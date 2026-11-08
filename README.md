@@ -59,6 +59,12 @@ In SBF's options, enable **focus audio** (mutes music/ambience while fishing).
 
 Keys are only sent while the foreground window title contains "World of Warcraft".
 
+**Breaks**: after a random 20-30 min of fishing it rests a random 5-10 min, always between
+casts (the log says `break: 7.3 min after 24.1 min of fishing (back at 13:02)`). Pausing it
+yourself for at least 5 min counts as the break; Pause during a break stops it (PAUSED).
+`--work-minutes 40,60 --break-minutes 3,6` changes the ranges, `--break-minutes 0` turns
+breaks off. Dry runs never break.
+
 ## What a session leaves behind (`--record DIR`)
 
 | File | Contents |

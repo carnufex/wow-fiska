@@ -270,6 +270,40 @@ class Keys(unittest.TestCase):
         self.assertEqual(ctypes.sizeof(fiska.INPUT), 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28)
 
 
+class BreaksTest(unittest.TestCase):
+    def make(self, work=(20, 30), rest=(5, 10)):
+        return fiska.Breaks(work, rest, rand=lambda lo, hi: (lo + hi) / 2)   # 25 min / 7.5 min
+
+    def test_due_after_the_work_period(self):
+        b = self.make()
+        b.add_work(24 * 60)
+        self.assertFalse(b.due())
+        b.add_work(60)
+        self.assertTrue(b.due())
+        self.assertEqual(b.take(), 7.5 * 60)
+        b.reset()
+        self.assertFalse(b.due())
+
+    def test_long_user_pause_counts_as_the_break(self):
+        b = self.make()
+        b.add_work(24 * 60)
+        b.user_paused(60)                 # a minute away: still due soon
+        b.add_work(60)
+        self.assertTrue(b.due())
+        b.user_paused(6 * 60)             # longer than the shortest break
+        self.assertFalse(b.due())
+
+    def test_zero_turns_breaks_off(self):
+        b = self.make(work=(0, 0))
+        b.add_work(10 * 3600)
+        self.assertFalse(b.due())
+
+    def test_ranges_parse(self):
+        self.assertEqual(fiska.parse_args([]).work_minutes, (20.0, 30.0))
+        self.assertEqual(fiska.parse_args([]).break_minutes, (5.0, 10.0))
+        self.assertEqual(fiska.parse_args(["--break-minutes", "7"]).break_minutes, (7.0, 7.0))
+
+
 class FakeGame:
     """Simulated game: bobber appears on cast and bursts with motion on a bite.
 
@@ -394,6 +428,45 @@ class FlowTest(unittest.TestCase):
     def test_blip_that_does_not_hold_is_not_a_bite(self):
         s = self.run_casts(FakeGame(own_splash=True, bite_len=0.12))
         self.assertEqual((s["caught"], s["no_loot"]), (0, 0), s)
+
+    def test_run_takes_breaks_between_casts(self):
+        import os, tempfile
+        game = FakeGame(own_splash=True)
+        game.device, game.close = {"name": "fake"}, lambda: None
+        lines = []
+        orig_log = fiska.log
+        fiska.log = lambda msg: lines.append((fiska.time.monotonic(), msg))
+        with tempfile.TemporaryDirectory() as d:
+            argv = ["--grace", "0.3", "--timeout", "7", "--loot-min", "0", "--loot-max", "0",
+                    "--reaction-min", "0", "--reaction-max", "0", "--bobber-min", "4", "--window", "",
+                    "--state", os.path.join(d, "s.json"),
+                    "--work-minutes", "0.01", "--break-minutes", "0.02", "--max-minutes", "0.2"]
+            args = fiska.parse_args(argv)
+            orig = (fiska.press_key, fiska.game_window, fiska.client_box, fiska.Screen, fiska.Listener)
+            fiska.press_key = game.press
+            fiska.game_window = lambda title: 1
+            fiska.client_box = lambda hwnd: (0, 0, 1000, 1000)
+            fiska.Screen = lambda *a, **k: game
+            fiska.Listener = lambda device=None: game
+            try:
+                f = fiska.Fisher(args)
+                f.run()
+            finally:
+                (fiska.press_key, fiska.game_window, fiska.client_box,
+                 fiska.Screen, fiska.Listener) = orig
+                fiska.log = orig_log
+        msgs = [m for _, m in lines]
+        starts = [t for t, m in lines if m.startswith("break:")]
+        overs = [t for t, m in lines if m == "break over"]
+        self.assertGreaterEqual(len(starts), 1, msgs)
+        self.assertGreaterEqual(f.stats["caught"], 2, msgs)
+        # every break follows a finished cast and ends before the next one starts
+        order = [m.split()[0] for m in msgs if m.startswith(("break:", "break over", "caught!", "cast "))]
+        for i, m in enumerate(order):
+            if m == "break:":
+                self.assertEqual(order[i - 1], "caught!", order)
+                self.assertEqual(order[i + 1], "break", order)
+        self.assertGreaterEqual(overs[0] - starts[0], 1.1)    # 0.02 min = 1.2 s
 
     def test_box_that_is_not_water_is_recast(self):
         game = FakeGame(own_splash=True, water=0.0)    # a static spot: wood, UI

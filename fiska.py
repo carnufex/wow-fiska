@@ -524,6 +524,55 @@ def log(msg):
         LOG_FILE.flush()
 
 
+def parse_range(text):
+    """'20,30' -> (20.0, 30.0); '25' -> (25.0, 25.0); '0' -> (0.0, 0.0) = off."""
+    vals = tuple(float(v) for v in text.split(","))
+    if len(vals) == 1:
+        vals = vals * 2
+    if len(vals) != 2 or vals[0] < 0 or vals[0] > vals[1]:
+        raise argparse.ArgumentTypeError("expected MIN,MAX minutes (or one number)")
+    return vals
+
+
+class Breaks:
+    """Natural pauses: fish for a random 20-30 min, rest for a random 5-10 min.
+
+    Only time actually spent casting counts as work, and a pause the user took
+    (Pause key, game out of focus) that was at least a minimum break long
+    counts as the break. Breaks start between casts, never mid-cast."""
+
+    def __init__(self, work, rest, rand=random.uniform):
+        self.work, self.rest, self.rand = work, rest, rand
+        self.worked = 0.0
+        self.next_work = self._pick(work)
+
+    def _pick(self, rng):
+        return self.rand(rng[0], rng[1]) * 60
+
+    @property
+    def enabled(self):
+        return self.work[1] > 0 and self.rest[1] > 0
+
+    def add_work(self, seconds):
+        self.worked += seconds
+
+    def user_paused(self, seconds):
+        """The user stopped us for `seconds`; a long enough stop is a break."""
+        if self.enabled and seconds >= self.rest[0] * 60:
+            self.reset()
+
+    def due(self):
+        return self.enabled and self.worked >= self.next_work
+
+    def take(self):
+        """Length in seconds of the break that is due now."""
+        return self._pick(self.rest)
+
+    def reset(self):
+        self.worked = 0.0
+        self.next_work = self._pick(self.work)
+
+
 def parse_frac(text):
     vals = tuple(float(v) for v in text.split(","))
     if len(vals) != 4 or not all(0 <= v <= 1 for v in vals) or vals[0] >= vals[2] or vals[1] >= vals[3]:
@@ -552,6 +601,7 @@ class Fisher:
         self.landings = deque(maxlen=20)   # screen centres of bobbers that caught a fish
         self.window_size = None            # the game window the landings belong to
         self.cur = {}                      # metrics of the cast in progress -> casts.csv
+        self.breaks = Breaks(args.work_minutes, args.break_minutes)
         for d in (args.debug_dir, args.record):
             if d:
                 os.makedirs(d, exist_ok=True)
@@ -578,6 +628,25 @@ class Fisher:
             if hwnd:
                 return hwnd
             time.sleep(0.1)
+
+    def take_break(self, deadline=None):
+        """Rest between casts. Pause key during the break = PAUSED (ends it).
+        Returns early at `deadline` (the --max-minutes end)."""
+        length = self.breaks.take()
+        until = time.monotonic() + length
+        back = time.strftime("%H:%M", time.localtime(time.time() + length))
+        log(f"break: {length / 60:.1f} min after {self.breaks.worked / 60:.1f} min of fishing "
+            f"(back at {back}) - {self.summary()}")
+        while time.monotonic() < until and not (deadline and time.monotonic() > deadline):
+            if self.toggle.pressed():
+                self.running = False
+                log("PAUSED (break ended early)")
+                break
+            self.listener.drain()      # don't let ten minutes of audio pile up
+            time.sleep(0.1)
+        else:
+            log("break over")
+        self.breaks.reset()
 
     def summary(self):
         s = self.stats
@@ -1069,10 +1138,20 @@ class Fisher:
             f"threshold {a.threshold} dB, margin {a.margin} dB, window '{a.window}'")
         log("RUNNING" if self.running else f"PAUSED - press {a.toggle.upper()} to start")
         started = time.monotonic()
+        deadline = started + a.max_minutes * 60 if a.max_minutes else None
+        if self.breaks.enabled and not a.dry_run:
+            log(f"breaks: {a.break_minutes[0]:g}-{a.break_minutes[1]:g} min after every "
+                f"{a.work_minutes[0]:g}-{a.work_minutes[1]:g} min of fishing "
+                f"(first after {self.breaks.next_work / 60:.1f} min)")
         bridge_logged = None
         try:
-            while not (a.max_minutes and time.monotonic() - started > a.max_minutes * 60):
+            while not (deadline and time.monotonic() > deadline):
+                if self.breaks.due() and not a.dry_run:
+                    self.take_break(deadline)
+                    continue
+                idle_from = time.monotonic()
                 hwnd = self.wait_ready()
+                self.breaks.user_paused(time.monotonic() - idle_from)
                 if self.window_size is None:
                     self.load_landings(client_box(hwnd))
                 has_bridge = self.screen.bridge(client_box(hwnd)) is not None
@@ -1084,7 +1163,9 @@ class Fisher:
                         log("FiskaSignal is the OLD version (no 'casting' square): lure/bait casts "
                             "are not waited out - /reload in game to load 1.1")
                     bridge_logged = has_bridge
+                cast_from = time.monotonic()
                 self.cast_once()
+                self.breaks.add_work(time.monotonic() - cast_from)
             else:
                 log(f"max runtime of {a.max_minutes} min reached")
         except KeyboardInterrupt:
@@ -1134,6 +1215,10 @@ def parse_args(argv=None):
     p.add_argument("--window", default="World of Warcraft",
                    help="only act while the foreground window title contains this")
     p.add_argument("--max-minutes", type=float, default=0, help="stop after N minutes (0 = never)")
+    p.add_argument("--work-minutes", type=parse_range, default=(20.0, 30.0),
+                   help="fish a random MIN,MAX minutes between breaks (default 20,30; 0 = no breaks)")
+    p.add_argument("--break-minutes", type=parse_range, default=(5.0, 10.0),
+                   help="break length, random MIN,MAX minutes (default 5,10; 0 = no breaks)")
     p.add_argument("--dry-run", action="store_true",
                    help="never press keys: you fish, the script logs when it WOULD reel in")
 
