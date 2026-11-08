@@ -1,0 +1,6 @@
+## Interface: 16001, 11509, 20506, 38002, 40402, 50504, 120105, 120107
+## Title: FiskaSignal
+## Notes: Paints a tiny status pixel (top-left) for the external fiska.py script.
+## Version: 1.0.0
+## OptionalDeps: SBF
+FiskaSignal.lua
