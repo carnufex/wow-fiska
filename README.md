@@ -6,17 +6,18 @@ reels in. `fiska.py` presses that key and decides *when*.
 
 ## How a bite is detected
 
-The game has no bite event, so the splash is the only cue. To ignore other players' splashes,
-a splash only counts when the signals agree:
+The game has no bite event. Sound turned out to be useless for it: in recorded casts the
+ambience was as loud as the splash (-30..-36 dB), and other players' splashes are heard too.
+So the bite is **seen** at *our* bobber:
 
 | Signal | What it gives |
 |---|---|
-| **Audio** (WASAPI loopback of the default output) | a loud transient over the recent background |
-| **Vision** | after every cast the script finds *our* bobber: what appeared in the picture where nothing changed before the key press (water flicker is discounted). A splash only counts if that small box moves at the same moment |
-| **FiskaSignal addon** (`addon/FiskaSignal`) | a 4x4 status pixel in the top-left corner: blue = loaded, red = channeling Fishing, green = loot window opened. Confirms a cast really started (vs. a lure being applied), when the bobber is gone, and whether a reel-in caught something |
+| **Vision** (primary) | after every cast the script finds our bobber: what newly appeared and then sits still, with newly appeared red (the feather) weighted. A bite = the median frame-to-frame change in that small box over 0.1 s reaches 2.5x the calm level (and +1.0). Other players' bobbers are elsewhere and do not count. On 6 recorded bites: all detected, 0.55-0.7 s before a human reacted; calm water peaked at 0.7 of the threshold |
+| **FiskaSignal addon** (`addon/FiskaSignal`) | two squares in the top-left corner: blue = loaded, red = channeling Fishing, green = loot opened; second square red = casting (lure/bait). Confirms a cast started, waits out lure casts, knows when the bobber is gone and whether a reel-in caught something |
+| **Audio** (optional) | `--confirm both` additionally requires a splash; `--confirm audio` uses sound only |
 
-Every signal is optional: without the addon the script uses timeouts; if the bobber is not found
-on a cast it trusts audio for that cast.
+If the bobber is not found on a cast, the script reels in and casts again (`--no-bobber audio`
+falls back to sound). Without the addon it uses timeouts.
 
 ## Setup
 

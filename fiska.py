@@ -4,22 +4,22 @@ The in-game addon does everything on a single key (default F10): it applies a
 new lure when the old one has run out, casts, and reels in the bobber. This
 script presses that key and decides *when* to press it.
 
-There is no game event for a bite, so the splash is the only cue. To avoid
-reacting to other players' splashes, a bite is accepted only when signals
-agree:
+There is no game event for a bite. Sound turned out to be useless for it
+(ambience is as loud as the splash, and other players' splashes are heard
+too), so the bite is SEEN instead:
 
-  * audio   - a loud transient on the game's audio output (WASAPI loopback),
-  * vision  - the script finds OUR bobber on screen right after the cast
-              (what appeared where nothing changed before) and requires a
-              burst of motion in that small box at the same moment,
-  * addon   - the FiskaSignal addon paints a status pixel in the top-left
-              corner: "channeling Fishing" and "loot window opened". That
-              tells us a cast really started (vs. a lure being applied), when
-              the bobber is gone, and whether a reel-in actually caught
-              something.
+  * vision  - right after each cast the script finds OUR bobber: what newly
+              appeared (red feather weighted) and then sits still. A bite is
+              a burst of motion in that small box - other players' bobbers
+              are elsewhere and do not count.
+  * addon   - the FiskaSignal addon paints two squares in the top-left
+              corner: "channeling Fishing", "loot window opened" and
+              "casting" (lure/bait). That tells us a cast really started,
+              when a lure is being applied, when the bobber is gone, and
+              whether a reel-in actually caught something.
+  * audio   - optional extra check (--confirm both) or fallback.
 
-Every signal is optional: without the addon the script falls back to
-timeouts, and if the bobber cannot be found it falls back to audio only.
+If the bobber is not found, the script reels in and casts again.
 
 Usage:
     python fiska.py --calibrate              # audio meter + addon status
@@ -36,6 +36,7 @@ import os
 import queue
 import random
 import sys
+import threading
 import time
 from collections import deque
 
@@ -200,17 +201,53 @@ class Screen:
         return 0.114 * img[..., 0] + 0.587 * img[..., 1] + 0.299 * img[..., 2]
 
     def bridge(self, box):
-        """Read the FiskaSignal pixel. None if the addon is not visible.
+        """Read the FiskaSignal squares. None if the addon is not visible.
 
-        Blue = marker (addon loaded), red = channeling Fishing,
-        green = loot window opened within the last ~1.5 s.
+        Square 1: blue = marker (addon loaded), red = channeling Fishing,
+                  green = loot window opened within the last ~1.5 s.
+        Square 2: blue = marker, red = casting something (lure, bait).
+        Each square is 6x6 UI units; at UI scale 1 the screen is 768 units high.
         """
-        left, top, _, _ = box
-        px = np.median(self.grab_bgra(left + 1, top + 1, 3, 3)[..., :3].reshape(-1, 3), axis=0)
-        b, g, r = (int(v) for v in px)
+        left, top, _, h = box
+        unit = max(1.0, h / 768.0)
+        strip = self.grab_bgra(left, top + int(3 * unit) - 1, int(12 * unit) + 2, 3)
+
+        def px(cx):
+            x = min(strip.shape[1] - 2, max(1, int(round(cx))))
+            return [int(v) for v in np.median(strip[:, x - 1:x + 2, :3].reshape(-1, 3), axis=0)]
+
+        b, g, r = px(3 * unit)
         if b < 200 or (60 < r < 200) or (60 < g < 200):
             return None
-        return {"fishing": r >= 200, "loot": g >= 200}
+        b2, _, r2 = px(9 * unit)
+        return {"fishing": r >= 200, "loot": g >= 200, "casting": b2 >= 200 and r2 >= 200}
+
+
+class FrameRing(threading.Thread):
+    """Background capture of the search region (dry run): when you cast by hand,
+    the frames from just before your key press are already here."""
+
+    def __init__(self, ds, every=0.1, keep=12):
+        super().__init__(daemon=True)
+        self.ds, self.every = ds, every
+        self.region = None
+        self.frames = deque(maxlen=keep)
+        self.lock = threading.Lock()
+
+    def run(self):
+        screen = Screen(self.ds)
+        while True:
+            region = self.region
+            if region:
+                frame = screen.grab_rgb(*region)
+                with self.lock:
+                    self.frames.append((time.monotonic(), region, frame))
+            time.sleep(self.every)
+
+    def before(self, t, region, n=3):
+        with self.lock:
+            got = [f for ft, r, f in self.frames if ft < t and r == region]
+        return got[-n:] if len(got) >= n else None
 
 
 def frac_box(box, frac):
@@ -293,34 +330,39 @@ def save_debug_png(path, img, marks):
 
 
 class MotionTracker:
-    """Frame-to-frame change inside the bobber box, with a rolling history."""
+    """Frame-to-frame change inside the bobber box.
 
-    def __init__(self, ratio, min_delta, keep_s=4.0):
-        self.ratio = ratio
-        self.min_delta = min_delta
-        self.keep_s = keep_s
+    A bite = the median change over the last `window` seconds reaches
+    max(base * ratio, base + delta), where base is the median over the
+    `base_s` seconds before that (minus a `gap`). Fitted on recorded casts:
+    calm water peaks at ~0.7 of that threshold, a bite at 1.2-1.6 of it,
+    ~0.6 s before a human reacted.
+    """
+
+    def __init__(self, ratio, delta, window=0.1, base_s=3.0, gap=0.3):
+        self.ratio, self.delta, self.window = ratio, delta, window
+        self.base_s, self.gap = base_s, gap
         self.samples = deque()
         self.prev = None
 
     def feed(self, t, frame):
         if self.prev is not None and self.prev.shape == frame.shape:
             self.samples.append((t, float(np.mean(np.abs(frame - self.prev)))))
-            while self.samples and t - self.samples[0][0] > self.keep_s:
+            while self.samples and t - self.samples[0][0] > self.base_s + self.gap + 1.0:
                 self.samples.popleft()
         self.prev = frame
 
-    def spike(self, t0, t1, guard=0.5):
-        """Was there a motion burst in [t0, t1] compared with the calm before?
-
-        Returns (verdict, peak, baseline); verdict None = not enough history.
-        """
-        before = [m for t, m in self.samples if t < t0 - guard]
-        during = [m for t, m in self.samples if t0 - guard <= t <= t1]
-        if len(before) < 5 or not during:
-            return None, 0.0, 0.0
+    def check(self, now):
+        """(hit, level, threshold, base), or None while there is too little history."""
+        recent = [m for t, m in self.samples if t > now - self.window]
+        before = [m for t, m in self.samples
+                  if now - self.gap - self.base_s < t <= now - self.gap]
+        if len(before) < 20 or len(recent) < 3:
+            return None
         base = float(np.median(before))
-        peak = max(during)
-        return peak >= max(base * self.ratio, base + self.min_delta), peak, base
+        level = float(np.median(recent))
+        threshold = max(base * self.ratio, base + self.delta)
+        return level >= threshold, level, threshold, base
 
 
 # --------------------------------------------------------------------------
@@ -441,6 +483,8 @@ class Fisher:
                       "dry_hit": 0, "dry_missed": 0, "dry_false": 0}
         self.cast_no = 0
         self.trace_audio, self.trace_motion, self.bites = [], [], []
+        self.rec_frames = None
+        self.ring = None
         for d in (args.debug_dir, args.record):
             if d:
                 os.makedirs(d, exist_ok=True)
@@ -471,10 +515,9 @@ class Fisher:
     def summary(self):
         s = self.stats
         if self.args.dry_run:
-            return (f"detected {s['dry_hit']}, missed {s['dry_missed']}, false alarms "
-                    f"{s['dry_false']}, ignored splashes {s['ignored']}")
+            return f"detected {s['dry_hit']}, missed {s['dry_missed']}, false alarms {s['dry_false']}"
         return (f"caught {s['caught']}, no bite {s['no_bite']}, empty reel-ins "
-                f"{s['no_loot']}, ignored splashes {s['ignored']}, lures {s['lure']}")
+                f"{s['no_loot']}, lures {s['lure']}")
 
     # -- vision ------------------------------------------------------------
     def frames(self, region, n=3, gap=0.07):
@@ -504,7 +547,7 @@ class Fisher:
             path = os.path.join(self.args.debug_dir, f"cast{self.cast_no:04d}_{'found' if found else 'miss'}.png")
             save_debug_png(path, post[-1], [(cx, cy, k)])
         if not found:
-            log(f"bobber not found (best score {score:.1f} < {self.args.bobber_min}) - audio only this cast")
+            log(f"bobber not found (best score {score:.1f} < {self.args.bobber_min})")
             return None
         ds = self.screen.ds
         half = int(k * self.args.motion_box / 2) * ds
@@ -524,14 +567,23 @@ class Fisher:
         return False
 
     def listen(self, box, has_bridge, bobber, cast_at):
-        """Returns 'bite', 'timeout', 'ended' or 'interrupted'."""
+        """Returns 'bite', 'timeout', 'ended' or 'interrupted'.
+
+        With a bobber box (default --confirm visual) a bite is a burst of motion
+        in that box. --confirm both also needs a splash within 0.8 s;
+        --confirm audio (or no bobber with --no-bobber audio) uses sound only.
+        """
         a = self.args
-        motion = MotionTracker(a.motion_ratio, a.motion_min) if bobber else None
-        pending = []  # (t, db, base) of splashes waiting for their motion check
+        motion = MotionTracker(a.motion_ratio, a.motion_min, a.motion_window) if bobber else None
+        audio_only = motion is None
         last_block = time.monotonic()
+        last_splash = -1e9
+        last_note = 0.0
 
         def bite(t, msg):
             """Real run: stop here. Dry run: note it and keep listening."""
+            if self.bites and t - self.bites[-1] < 1.5:
+                return False  # same burst
             log(("[dry] would reel in: " if a.dry_run else "") + msg)
             self.bites.append(t)
             return not a.dry_run
@@ -544,10 +596,7 @@ class Fisher:
                 state = self.screen.bridge(box)
                 if state is not None and not state["fishing"]:
                     return "ended"
-            if motion:
-                motion.feed(now, self.screen.grab_gray(*bobber))
-                if motion.samples:
-                    self.trace_motion.append(motion.samples[-1])
+
             blocks = self.listener.drain()
             if blocks:
                 last_block = blocks[-1][0]
@@ -556,39 +605,32 @@ class Fisher:
                 # count one silent block per 20 ms of nothing.
                 blocks = [(now, SILENCE_DB)]
                 last_block = now
-            if not blocks and not motion:
-                time.sleep(0.01)
             self.trace_audio.extend(blocks)
             for t, db in blocks:
                 hit, base = self.splash.feed(db)
-                if hit and not (pending and t - pending[-1][0] < 0.3):
-                    pending.append((t, db, base))
-
-            if a.confirm == "visual" and motion:
-                verdict, peak, base = motion.spike(now - 0.15, now)
-                if verdict and (not self.bites or now - self.bites[-1] > 1.0):
-                    if bite(now, f"bite (motion {peak:.1f} vs {base:.1f})"):
+                if hit:
+                    last_splash = t
+                    if audio_only and bite(t, f"bite  splash {db:.1f} dB (background {base:.1f} dB)"):
                         return "bite"
+
+            if audio_only:
+                time.sleep(0.01)
                 continue
 
-            # Splashes whose motion window has passed get their verdict.
-            while pending and (a.confirm == "audio" or motion is None
-                               or now - pending[0][0] >= a.confirm_window):
-                t0, db, base = pending.pop(0)
-                if a.confirm == "audio" or motion is None:
-                    if bite(t0, f"bite  splash {db:.1f} dB (background {base:.1f} dB)"):
-                        return "bite"
-                    continue
-                verdict, peak, mbase = motion.spike(t0, now)
-                if verdict is None:
-                    log(f"splash {db:.1f} dB ignored - too soon after the bobber landed")
-                elif verdict:
-                    if bite(t0, f"bite  splash {db:.1f} dB + motion {peak:.1f} (calm {mbase:.1f})"):
-                        return "bite"
-                else:
-                    self.stats["ignored"] += 1
-                    log(f"splash {db:.1f} dB ignored - our bobber did not move "
-                        f"(motion {peak:.1f}, calm {mbase:.1f})")
+            motion.feed(now, self.screen.grab_gray(*bobber))
+            if motion.samples:
+                self.trace_motion.append(motion.samples[-1])
+            result = motion.check(now)
+            if not result or not result[0]:
+                continue
+            _, level, threshold, base = result
+            if a.confirm == "both" and now - last_splash > 0.8:
+                if now - last_note > 1.0:
+                    log(f"bobber moved ({level:.1f}) but no splash heard - ignored")
+                    last_note = now
+                continue
+            if bite(now, f"bite  bobber motion {level:.1f} (threshold {threshold:.1f}, calm {base:.1f})"):
+                return "bite"
         return "timeout"
 
     def cast_once(self):
@@ -600,48 +642,69 @@ class Fisher:
         use_vision = a.confirm != "audio"
 
         if a.dry_run:
-            # You cast; we only watch. Keep the last few frames from before the cast.
+            # You cast; we only watch. Frames from just before your press come
+            # from the background ring.
             if not has_bridge:
                 log("--dry-run needs the FiskaSignal addon (it tells us when you cast)")
                 time.sleep(2.0)
                 return
-            recent = deque(maxlen=3)
+            if use_vision:
+                if self.ring is None:
+                    self.ring = FrameRing(self.screen.ds)
+                    self.ring.start()
+                self.ring.region = region
             while True:
                 if not self.ready():
                     return
                 state = self.screen.bridge(box)
                 if state and state["fishing"]:
                     break
-                if use_vision:
-                    recent.append(self.screen.grab_rgb(*region))
-                time.sleep(0.08)
-            pre = list(recent) if len(recent) == 3 else None
-            use_vision = use_vision and pre is not None
-            self.cast_no += 1
+                time.sleep(0.03)
             cast_at = time.monotonic()
+            pre = self.ring.before(cast_at - 0.05, region) if use_vision else None
+            self.cast_no += 1
             log("you cast (addon confirms Fishing)")
         else:
             pre = self.frames(region) if use_vision else None
             self.cast_no += 1
             press_key(self.key)
             cast_at = time.monotonic()
-
-        if a.dry_run:
-            pass
-        elif has_bridge:
-            if not self.wait_bridge(box, lambda s: s["fishing"], a.cast_wait):
-                self.stats["lure"] += 1
-                log("key pressed but no Fishing channel started (lure applied?) - pressing again")
-                time.sleep(a.lure_wait + random.uniform(0.0, 0.6))
-                return
-            log("cast (addon confirms Fishing)")
-        else:
-            log("cast")
+            if has_bridge:
+                started = self.wait_bridge(box, lambda s: s["fishing"] or s["casting"], a.cast_wait)
+                state = self.screen.bridge(box) or {}
+                if state.get("casting") and not state.get("fishing"):
+                    self.stats["lure"] += 1
+                    log("applying lure/bait - waiting for the cast to finish")
+                    self.wait_bridge(box, lambda s: not s["casting"], a.lure_timeout)
+                    time.sleep(random.uniform(0.3, 0.7))
+                    return
+                if not started:
+                    log("key pressed but nothing started - trying again")
+                    time.sleep(random.uniform(0.6, 1.2))
+                    return
+                log("cast (addon confirms Fishing)")
+            else:
+                log("cast")
 
         self.trace_audio, self.trace_motion, self.bites = [], [], []
         self.rec_frames = None
         time.sleep(max(0.0, a.grace - (time.monotonic() - cast_at)))
-        bobber = self.find_bobber(region, pre, self.frames(region, n=4, gap=0.1)) if use_vision else None
+        bobber = None
+        if use_vision and pre is not None:
+            bobber = self.find_bobber(region, pre, self.frames(region, n=4, gap=0.1))
+        elif use_vision:
+            log("no frames from before the cast")
+        if use_vision and bobber is None and a.no_bobber == "recast":
+            if a.dry_run:
+                log("bobber not found - a real run would reel in and recast")
+                self.wait_bridge(box, lambda s: not s["fishing"], a.timeout)
+                return
+            log("bobber not found - reeling in and recasting")
+            state = self.screen.bridge(box) if has_bridge else None
+            if state is None or state["fishing"]:
+                press_key(self.key)
+            time.sleep(random.uniform(1.0, 1.8))
+            return
         self.listener.drain()
         self.splash.reset()
 
@@ -659,7 +722,7 @@ class Fisher:
                 log(f"Fishing channel ended without a bite{' (but loot?!)' if loot else ''}  "
                     f"({self.summary()})")
             self.save_record(cast_at, end_t, loot, bobber)
-            time.sleep(random.uniform(0.3, 0.8))
+            time.sleep(0.0 if a.dry_run else random.uniform(0.3, 0.8))
             return
         if result == "timeout":
             self.stats["no_bite"] += 1
@@ -675,13 +738,16 @@ class Fisher:
         if not self.ready():
             return
         press_key(self.key)
+        end_t = time.monotonic()
         if has_bridge:
-            if self.wait_bridge(box, lambda s: s["loot"], 3.0):
+            loot = self.wait_bridge(box, lambda s: s["loot"], 3.0)
+            if loot:
                 self.stats["caught"] += 1
                 log(f"caught!  ({self.summary()})")
             else:
                 self.stats["no_loot"] += 1
                 log(f"reeled in but no loot window (false bite?)  ({self.summary()})")
+            self.save_record(cast_at, end_t, loot, bobber)
         else:
             self.stats["caught"] += 1
             log(f"reeled in  ({self.summary()})")
@@ -802,14 +868,16 @@ def parse_args(argv=None):
                    help="never press keys: you fish, the script logs when it WOULD reel in")
 
     g = p.add_argument_group("bite detection")
-    g.add_argument("--confirm", choices=("both", "audio", "visual"), default="both",
-                   help="both = splash must coincide with motion at our bobber (default)")
+    g.add_argument("--confirm", choices=("visual", "both", "audio"), default="visual",
+                   help="visual = burst of motion at OUR bobber (default); both = plus a splash; "
+                        "audio = sound only")
+    g.add_argument("--no-bobber", choices=("recast", "audio"), default="recast",
+                   help="when the bobber is not found: reel in and recast (default) or use sound")
     g.add_argument("--threshold", type=float, default=-50.0, help="splash level floor, dBFS (default -50)")
     g.add_argument("--margin", type=float, default=12.0, help="dB above background (default 12)")
-    g.add_argument("--confirm-window", type=float, default=0.35,
-                   help="seconds after a splash to look for bobber motion (default 0.35)")
-    g.add_argument("--motion-ratio", type=float, default=2.5, help="motion burst vs calm (default 2.5x)")
-    g.add_argument("--motion-min", type=float, default=3.0, help="motion burst min increase (default 3.0)")
+    g.add_argument("--motion-ratio", type=float, default=2.5, help="bite = motion this many times calm (default 2.5)")
+    g.add_argument("--motion-min", type=float, default=1.0, help="...and at least this much above calm (default 1.0)")
+    g.add_argument("--motion-window", type=float, default=0.1, help="seconds of motion the bite median spans (default 0.1)")
 
     g = p.add_argument_group("bobber search (fractions of the game window)")
     g.add_argument("--search", type=parse_frac, default=(0.05, 0.12, 0.85, 0.72),
@@ -826,8 +894,8 @@ def parse_args(argv=None):
 
     g = p.add_argument_group("timing (seconds)")
     g.add_argument("--cast-wait", type=float, default=2.0, help="max wait for the Fishing channel to start")
-    g.add_argument("--lure-wait", type=float, default=3.5,
-                   help="wait after a press that did not start Fishing (lure cast time)")
+    g.add_argument("--lure-timeout", type=float, default=20.0,
+                   help="max wait for a lure/bait cast to finish (default 20)")
     g.add_argument("--grace", type=float, default=2.0, help="ignore audio this long after the cast")
     g.add_argument("--timeout", type=float, default=32.0, help="give up on a cast after this long")
     g.add_argument("--reaction-min", type=float, default=0.25)

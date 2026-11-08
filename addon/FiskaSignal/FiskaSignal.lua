@@ -1,8 +1,10 @@
--- FiskaSignal: a 4x4 status square in the top-left corner of the screen,
+-- FiskaSignal: two 6x6 status squares in the top-left corner of the screen,
 -- read by the external fiska.py script.
---   blue  = always on (marker: the addon is loaded)
---   red   = the player is channeling Fishing (our bobber is in the water)
---   green = a loot window opened during the last 1.5 s (catch confirmed)
+--   square 1: blue  = always on (marker: the addon is loaded)
+--             red   = the player is channeling Fishing (our bobber is in the water)
+--             green = a loot window opened during the last 1.5 s (catch confirmed)
+--   square 2: blue  = always on (marker)
+--             red   = the player is casting something (applying a lure or bait)
 --
 -- It reads nothing the default UI does not already show and changes nothing.
 
@@ -12,6 +14,7 @@ local FISHING_IDS = {
     [131476] = true, [131490] = true,
 }
 local FISHING_ICON = 136245
+local SIZE = 6
 
 local fishingNames
 
@@ -52,15 +55,26 @@ local function IsFishing()
     return ok and fishing or false
 end
 
+local function IsCasting()
+    local ok, name = pcall(UnitCastingInfo, "player")
+    return ok and name ~= nil
+end
+
 -- No parent: unaffected by UI scale and still visible when the UI is hidden (Alt+Z).
 local f = CreateFrame("Frame", "FiskaSignalFrame", nil)
 f:SetFrameStrata("TOOLTIP")
-f:SetSize(4, 4)
+f:SetSize(SIZE * 2, SIZE)
 f:SetPoint("TOPLEFT", WorldFrame, "TOPLEFT", 0, 0)
 
-local tex = f:CreateTexture(nil, "OVERLAY")
-tex:SetAllPoints()
-tex:SetColorTexture(0, 0, 1, 1)
+local status = f:CreateTexture(nil, "OVERLAY")
+status:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0)
+status:SetSize(SIZE, SIZE)
+status:SetColorTexture(0, 0, 1, 1)
+
+local casting = f:CreateTexture(nil, "OVERLAY")
+casting:SetPoint("TOPLEFT", f, "TOPLEFT", SIZE, 0)
+casting:SetSize(SIZE, SIZE)
+casting:SetColorTexture(0, 0, 1, 1)
 f:Show()
 
 local lootUntil = 0
@@ -77,5 +91,6 @@ f:SetScript("OnUpdate", function(_, elapsed)
         return
     end
     acc = 0
-    tex:SetColorTexture(IsFishing() and 1 or 0, GetTime() < lootUntil and 1 or 0, 1, 1)
+    status:SetColorTexture(IsFishing() and 1 or 0, GetTime() < lootUntil and 1 or 0, 1, 1)
+    casting:SetColorTexture(IsCasting() and 1 or 0, 0, 1, 1)
 end)
