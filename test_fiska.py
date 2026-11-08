@@ -95,6 +95,19 @@ class LocateBobber(unittest.TestCase):
         self.assertLessEqual(abs(cy - 64), 5)
         self.assertGreater(score, 6.0)
 
+    def test_animated_portrait_at_frame_edge_is_ignored(self):
+        """A party frame's portrait cut by the frame edge looks small and calm
+        (its ring is partly outside); it must not beat the bobber."""
+        rng = np.random.default_rng(10)
+        pre = [water(rng, 240, 400) for _ in range(3)]
+        post = [water(rng, 240, 400) for _ in range(4)]
+        for f in post:
+            f[232:240, 300:316] = 250            # portrait poking in at the bottom edge
+            f[80:86, 150:156] = 200              # our bobber, dimmer
+        cx, cy, _, _ = fiska.locate_bobber(pre, post, k=7)
+        self.assertLessEqual(abs(cx - 153), 3)
+        self.assertLessEqual(abs(cy - 83), 3)
+
     def test_existing_bobber_of_neighbour_is_ignored(self):
         """A bobber that was already there before our cast is not 'new'."""
         rng = np.random.default_rng(3)
@@ -193,6 +206,12 @@ class Keys(unittest.TestCase):
         self.assertEqual(fiska.vk_from_name("e"), ord("E"))
         with self.assertRaises(ValueError):
             fiska.vk_from_name("nope")
+
+    def test_second_instance_is_refused(self):
+        name = "Local\\fiska-test-%d" % id(self)
+        first = fiska.single_instance(name)
+        self.assertIsNotNone(first)
+        self.assertIsNone(fiska.single_instance(name))
 
     def test_input_struct_size(self):
         self.assertEqual(ctypes.sizeof(fiska.INPUT), 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28)

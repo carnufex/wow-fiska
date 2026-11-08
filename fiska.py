@@ -323,6 +323,11 @@ def locate_bobber(pre, post, k, exclude=None, red_weight=3.0, ring_weight=3.0):
     centre = centered_box_mean(score, k)
     ring = (9 * centered_box_mean(score, 3 * k) - centre) / 8
     smap = centre - ring_weight * ring
+    # Near the frame edge the ring reaches outside it, reads as calm, and an
+    # edge object (a party frame's animated portrait) wins. Keep clear of it.
+    edge = (3 * k) // 2
+    smap[:edge, :] = smap[-edge:, :] = -np.inf
+    smap[:, :edge] = smap[:, -edge:] = -np.inf
     y, x = np.unravel_index(int(np.argmax(smap)), smap.shape)
     return x, y, float(smap[y, x]), smap
 
@@ -894,8 +899,8 @@ def parse_args(argv=None):
     g.add_argument("--motion-window", type=float, default=0.1, help="seconds of motion the bite median spans (default 0.1)")
 
     g = p.add_argument_group("bobber search (fractions of the game window)")
-    g.add_argument("--search", type=parse_frac, default=(0.05, 0.12, 0.85, 0.72),
-                   help="where bobbers can land, x1,y1,x2,y2 (default 0.05,0.12,0.85,0.72)")
+    g.add_argument("--search", type=parse_frac, default=(0.05, 0.10, 0.85, 0.68),
+                   help="where bobbers can land, x1,y1,x2,y2 (default 0.05,0.10,0.85,0.68)")
     g.add_argument("--exclude", type=parse_frac, default=(0.46, 0.52, 0.56, 1.0),
                    help="ignore this box: your character + cast bar (default 0.46,0.52,0.56,1.0)")
     g.add_argument("--bobber-size", type=float, default=0.02, help="bobber size vs window height (default 0.02)")
@@ -919,6 +924,22 @@ def parse_args(argv=None):
     return p.parse_args(argv)
 
 
+ERROR_ALREADY_EXISTS = 183
+
+
+def single_instance(name="Local\\fiska-one-key-fishing"):
+    """Hold a named mutex for the life of the process. Two fishers pressing the
+    same key out of step reel in each other's casts ~2 s after every throw.
+    Returns the handle, or None when another instance already holds it."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, wt.BOOL, wt.LPCWSTR)
+    kernel32.CreateMutexW.restype = wt.HANDLE
+    handle = kernel32.CreateMutexW(None, False, name)
+    if not handle or ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        return None
+    return handle
+
+
 def main():
     args = parse_args()
     if args.list_devices:
@@ -926,6 +947,11 @@ def main():
     elif args.calibrate:
         calibrate(args)
     else:
+        lock = single_instance()
+        if lock is None:
+            log("another fiska.py is already running - stop it first (two of them reel in "
+                "each other's casts)")
+            sys.exit(1)
         Fisher(args).run()
 
 
