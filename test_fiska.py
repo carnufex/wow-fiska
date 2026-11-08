@@ -65,11 +65,35 @@ class LocateBobber(unittest.TestCase):
 
         pre = [scene(20, False) for _ in range(3)]
         post = [scene(40, True) for _ in range(4)]                   # NPC moved 20 px
-        cx_gray, _, _, _ = fiska.locate_bobber(pre, post, k=7, red_weight=0)
+        cx_plain, _, _, _ = fiska.locate_bobber(pre, post, k=7, red_weight=0, ring_weight=0)
         cx, cy, _, _ = fiska.locate_bobber(pre, post, k=7)
-        self.assertLess(cx_gray, 100, "sanity: gray alone picks the NPC")
+        self.assertLess(cx_plain, 100, "sanity: plain change (no red, no ring) picks the NPC")
         self.assertLessEqual(abs(cx - 152), 4)
         self.assertLessEqual(abs(cy - 33), 5)
+
+    def test_popup_window_loses_to_bobber(self):
+        """A UI window popping up is a big change with red text and sharp edges;
+        the bobber is small and alone on calm water."""
+        rng = np.random.default_rng(9)
+
+        def scene(panel, bobber):
+            f = np.empty((240, 400, 3), np.float32)
+            f[...] = (70, 60, 140)
+            f += rng.normal(0, 4, f.shape).astype(np.float32)
+            if panel:
+                f[120:200, 20:180] = (200, 170, 60)
+                f[140:148, 30:170] = (255, 40, 40)               # red text
+            if bobber:
+                f[60:64, 300:305] = (120, 75, 80)
+                f[64:68, 301:304] = (190, 150, 140)
+            return f
+
+        pre = [scene(False, False) for _ in range(3)]
+        post = [scene(True, True) for _ in range(4)]
+        cx, cy, score, _ = fiska.locate_bobber(pre, post, k=7)
+        self.assertLessEqual(abs(cx - 302), 4)
+        self.assertLessEqual(abs(cy - 64), 5)
+        self.assertGreater(score, 6.0)
 
     def test_existing_bobber_of_neighbour_is_ignored(self):
         """A bobber that was already there before our cast is not 'new'."""

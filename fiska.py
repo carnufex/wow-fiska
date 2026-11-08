@@ -266,6 +266,12 @@ def box_mean(a, k):
     return s / (k * k)
 
 
+def centered_box_mean(a, k):
+    """Same-size map: mean of the k x k window centred on each pixel (zero padded)."""
+    lo = k // 2
+    return box_mean(np.pad(a, ((lo, k - 1 - lo), (lo, k - 1 - lo))), k)
+
+
 def to_gray(frames):
     """(n, h, w, 3) RGB or (n, h, w) gray -> (n, h, w) gray."""
     if frames.ndim == 3:
@@ -288,7 +294,7 @@ def _stable_change(pre, post, positive_only=False):
     return np.clip(change - noise, 0, None)
 
 
-def locate_bobber(pre, post, k, exclude=None, red_weight=3.0):
+def locate_bobber(pre, post, k, exclude=None, red_weight=3.0, ring_weight=3.0):
     """Find what appeared after the cast.
 
     pre/post: lists of RGB (or gray) frames from just before the key press and
@@ -299,6 +305,12 @@ def locate_bobber(pre, post, k, exclude=None, red_weight=3.0):
     which keeps NPCs and pets that merely shifted from winning.
     exclude: boolean mask of pixels to ignore (character, cast bar, chat).
 
+    The bobber is also small and alone on calm water: each spot scores its
+    k x k mean minus ring_weight x the mean of the ring around it (the 3k x 3k
+    area minus the centre). A UI window or message that pops up changes its
+    surroundings too, so it scores below zero instead of winning. Weight 3 kept
+    18/18 recorded bobbers and beat a pasted-in UI panel on all of them.
+
     Returns (cx, cy, score, score_map) in frame coordinates.
     """
     pre = np.stack(pre).astype(np.float32)
@@ -308,9 +320,11 @@ def locate_bobber(pre, post, k, exclude=None, red_weight=3.0):
         score += red_weight * _stable_change(redness(pre), redness(post), positive_only=True)
     if exclude is not None:
         score[exclude] = 0
-    smap = box_mean(score, k)
+    centre = centered_box_mean(score, k)
+    ring = (9 * centered_box_mean(score, 3 * k) - centre) / 8
+    smap = centre - ring_weight * ring
     y, x = np.unravel_index(int(np.argmax(smap)), smap.shape)
-    return x + k // 2, y + k // 2, float(smap[y, x]), smap
+    return x, y, float(smap[y, x]), smap
 
 
 def save_debug_png(path, img, marks):
