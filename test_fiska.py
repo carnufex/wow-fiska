@@ -241,6 +241,25 @@ class Keys(unittest.TestCase):
         with self.assertRaises(ValueError):
             fiska.vk_from_name("nope")
 
+    def test_landing_zone_survives_a_restart_for_the_same_window(self):
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "state.json")
+            args = fiska.parse_args(["--state", path])
+            first = fiska.Fisher.__new__(fiska.Fisher)
+            first.args, first.landings, first.window_size = args, fiska.deque(maxlen=20), None
+            first.load_landings((0, 0, 2560, 1440))
+            for i in range(6):
+                first.add_landing(1250 + i, 500)
+            again = fiska.Fisher.__new__(fiska.Fisher)
+            again.args, again.landings, again.window_size = args, fiska.deque(maxlen=20), None
+            again.load_landings((0, 0, 2560, 1440))
+            self.assertEqual(len(again.landings), 6)
+            other = fiska.Fisher.__new__(fiska.Fisher)
+            other.args, other.landings, other.window_size = args, fiska.deque(maxlen=20), None
+            other.load_landings((0, 0, 1920, 1080))          # different window: not used
+            self.assertEqual(len(other.landings), 0)
+
     def test_second_instance_is_refused(self):
         name = "Local\\fiska-test-%d" % id(self)
         first = fiska.single_instance(name)

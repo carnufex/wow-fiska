@@ -31,6 +31,7 @@ Usage:
 import argparse
 import csv
 import ctypes
+import json
 import ctypes.wintypes as wt
 import math
 import os
@@ -549,6 +550,7 @@ class Fisher:
         self.clips = []
         self.ring = None
         self.landings = deque(maxlen=20)   # screen centres of bobbers that caught a fish
+        self.window_size = None            # the game window the landings belong to
         self.cur = {}                      # metrics of the cast in progress -> casts.csv
         for d in (args.debug_dir, args.record):
             if d:
@@ -593,6 +595,35 @@ class Fisher:
             if i < n - 1:
                 time.sleep(gap)
         return out
+
+    def load_landings(self, box):
+        """Landing zone from earlier sessions (--state), if the game window is the
+        same size: the zone then guards the first casts too. A session's first
+        empty reel-in was a pet on the dock, picked before 5 catches existed."""
+        self.window_size = [int(box[2]), int(box[3])]
+        if not self.args.state or not os.path.exists(self.args.state):
+            return
+        try:
+            with open(self.args.state, encoding="utf-8") as fh:
+                state = json.load(fh)
+        except (OSError, ValueError) as err:
+            log(f"could not read {self.args.state} ({err}) - learning the landing zone from scratch")
+            return
+        if state.get("window") != self.window_size:
+            log(f"landing zone in {self.args.state} is for a {state.get('window')} window - not used")
+            return
+        self.landings.extend(tuple(p) for p in state.get("landings", []))
+        log(f"landing zone from earlier sessions: {len(self.landings)} catches "
+            f"(falls back to searching everywhere if nothing is there)")
+
+    def add_landing(self, x, y):
+        self.landings.append((float(x), float(y)))
+        if self.args.state and self.window_size:
+            try:
+                with open(self.args.state, "w", encoding="utf-8") as fh:
+                    json.dump({"window": self.window_size, "landings": list(self.landings)}, fh)
+            except OSError as err:
+                log(f"could not save {self.args.state}: {err}")
 
     def landing_zone(self, region, shape):
         """Where our bobbers have been landing (from casts that caught a fish),
@@ -941,7 +972,7 @@ class Fisher:
             loot = self.wait_bridge(box, lambda s: s["loot"], 3.0)
             if loot:
                 self.stats["caught"] += 1
-                self.landings.append((bobber[0] + bobber[2] / 2, bobber[1] + bobber[3] / 2))
+                self.add_landing(bobber[0] + bobber[2] / 2, bobber[1] + bobber[3] / 2)
                 log(f"caught!  ({self.summary()})")
             else:
                 self.stats["no_loot"] += 1
@@ -992,7 +1023,7 @@ class Fisher:
         elif hits:
             self.stats["dry_hit"] += 1
             if self.cur.get("bobber_x"):
-                self.landings.append((self.cur["bobber_x"], self.cur["bobber_y"]))
+                self.add_landing(self.cur["bobber_x"], self.cur["bobber_y"])
             verdict = f"DETECTED ({end_t - hits[-1]:.1f}s before you)"
         else:
             self.stats["dry_missed"] += 1
@@ -1042,6 +1073,8 @@ class Fisher:
         try:
             while not (a.max_minutes and time.monotonic() - started > a.max_minutes * 60):
                 hwnd = self.wait_ready()
+                if self.window_size is None:
+                    self.load_landings(client_box(hwnd))
                 has_bridge = self.screen.bridge(client_box(hwnd)) is not None
                 if has_bridge != bridge_logged:
                     log("FiskaSignal addon: " + ("detected" if has_bridge else
@@ -1133,6 +1166,8 @@ def parse_args(argv=None):
                    help="the bobber box must look like water: calm motion at least this (default 0.3)")
     g.add_argument("--max-calm", type=float, default=2.5,
                    help="...and at most this (default 2.5; someone walking there is ~4)")
+    g.add_argument("--state", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "fiska_state.json"),
+                   help="where the learned landing zone is kept between sessions ('' = do not keep)")
     g.add_argument("--zone-min", type=float, default=0.08,
                    help="learned landing zone: at least +/- this fraction of the window height (default 0.08)")
     g.add_argument("--motion-window", type=float, default=0.1, help="seconds of motion the bite median spans (default 0.1)")

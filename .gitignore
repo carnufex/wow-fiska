@@ -2,5 +2,6 @@
 .venv/
 __pycache__/
 debug/
+fiska_state.json
 rec/
 rec_smoke/
