@@ -8,16 +8,36 @@ reels in. `fiska.py` presses that key and decides *when*.
 
 The game has no bite event. Sound turned out to be useless for it: in recorded casts the
 ambience was as loud as the splash (-30..-36 dB), and other players' splashes are heard too.
-So the bite is **seen** at *our* bobber:
+So the bite is **seen** at *our* bobber. Every rule below was fitted on recorded sessions
+(~150 casts, 112 real bites) and is replayed against them before it ships.
+
+**Finding the bobber** (after every cast)
+
+- what newly appeared between frames from just before the key press and just after landing,
+  and then sits still; newly appeared red (the feather) weighs 3x;
+- small and alone: centre minus 3x the ring around it, so pop-up UI and big objects lose;
+- away from the frame edge (party-frame portraits sit there);
+- **learned landing zone**: after 5 catches, only where our bobbers have been landing
+  (falls back to the whole area when nothing is there). Players walking onto the dock and
+  stopping outscored the bobber 8 times in one session before this;
+- **water check**: the box must ripple like water (calm 0.3-2.5); wood/UI is ~0.1, someone
+  walking ~4. Otherwise: reel in and cast again.
+
+**Deciding it is a bite**
+
+- median frame-to-frame change over 0.1 s reaches 2.2x calm (+0.8);
+- not in the first 2.5 s of watching (earliest of 96 real bites: 3.2 s);
+- trigger peak at most 5.5 (real bites <= 4.51) and no over-cap burst in the last second;
+- it must **hold** for 0.2 s: median 0.6-2.0x the threshold (real bites 0.72-1.35x; a blip
+  falls back, something walking in keeps growing).
 
 | Signal | What it gives |
 |---|---|
-| **Vision** (primary) | after every cast the script finds our bobber: what newly appeared and then sits still, with newly appeared red (the feather) weighted. A bite = the median frame-to-frame change in that small box over 0.1 s reaches 2.5x the calm level (and +1.0). Other players' bobbers are elsewhere and do not count. On 6 recorded bites: all detected, 0.55-0.7 s before a human reacted; calm water peaked at 0.7 of the threshold |
-| **FiskaSignal addon** (`addon/FiskaSignal`) | two squares in the top-left corner: blue = loaded, red = channeling Fishing, green = loot opened; second square red = casting (lure/bait). Confirms a cast started, waits out lure casts, knows when the bobber is gone and whether a reel-in caught something |
+| **Vision** (primary) | the above |
+| **FiskaSignal addon** (`addon/FiskaSignal`) | two squares in the top-left corner: blue = loaded, red = channeling Fishing, green = loot opened; second square red = casting (lure/bait). Confirms a cast started, waits out lure casts, knows when the bobber is gone and whether a reel-in caught something. The log warns when the game still runs the old 1.0 |
 | **Audio** (optional) | `--confirm both` additionally requires a splash; `--confirm audio` uses sound only |
 
-If the bobber is not found on a cast, the script reels in and casts again (`--no-bobber audio`
-falls back to sound). Without the addon it uses timeouts.
+Only one `fiska.py` may run: two of them reel in each other's casts.
 
 ## Setup
 
@@ -32,17 +52,25 @@ In SBF's options, enable **focus audio** (mutes music/ambience while fishing).
 ## Use
 
 ```bash
-.venv\Scripts\python fiska.py --calibrate     # audio peak meter + addon status
-.venv\Scripts\python fiska.py --dry-run --debug-dir debug --record rec   # you fish, it scores itself
-.venv\Scripts\python fiska.py                 # fish; Pause = start/pause
+.venv\Scripts\python fiska.py --record rec                 # fish; Pause = start/pause
+.venv\Scripts\python fiska.py --dry-run --record rec       # you fish, it scores itself
+.venv\Scripts\python fiska.py --calibrate                  # audio meter + addon status
 ```
 
 Keys are only sent while the foreground window title contains "World of Warcraft".
-`debug/castNNNN_found.png` shows where the bobber was found each cast (red square).
-In `--dry-run` every reel-in is scored (DETECTED / MISSED / false alarms) and the log shows the
-loudest sound and largest bobber motion just before you reeled in. `--record` saves per-cast
-traces and the pre/post frames (`rec/castNNNN.npz`) for offline tuning.
-Tune with `--threshold`, `--margin`, `--search`, `--exclude`, `--bobber-min`; see `--help`.
+
+## What a session leaves behind (`--record DIR`)
+
+| File | Contents |
+|---|---|
+| `fiska-YYYYMMDD-HHMMSS.log` | the console log |
+| `casts.csv` | one row per cast: outcome (caught / empty / no_bite / not_water / no_bobber / lure / ...), bobber position, search score and whether the landing zone was used, calm level, trigger level, threshold, peak, hold (x threshold), bursts, blips, duration |
+| `castNNNN.npz` | pre/post frames of the bobber search, motion and audio traces, bite times, and ~1.8 s of bobber-box frames around every bite and ignored burst |
+| `castNNNN_bobber.png` | where the bobber was found (red square) |
+| `castNNNN_bite.png` / `_burst.png` / `_notwater.png` / `_ended.png` | the search area at that moment |
+
+In `--dry-run` every reel-in is also scored (DETECTED / MISSED / false alarms) with the loudest
+sound and largest bobber motion just before it.
 
 ## Tests
 

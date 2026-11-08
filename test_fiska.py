@@ -108,6 +108,23 @@ class LocateBobber(unittest.TestCase):
         self.assertLessEqual(abs(cx - 153), 3)
         self.assertLessEqual(abs(cy - 83), 3)
 
+    def test_landing_zone_beats_bigger_change_outside_it(self):
+        """A player who walked onto the dock and stopped is 'new and still' and
+        bigger than the bobber; outside the learned landing zone it is ignored."""
+        rng = np.random.default_rng(13)
+        pre = [water(rng, 240, 400) for _ in range(3)]
+        post = [water(rng, 240, 400) for _ in range(4)]
+        for f in post:
+            f[150:157, 300:307] = 255           # player standing on the dock: compact, strong change
+            f[60:66, 100:106] = 200             # our bobber
+        cx, _, _, _ = fiska.locate_bobber(pre, post, k=7)
+        self.assertGreater(cx, 250, "sanity: without a zone the player wins")
+        zone = np.zeros((240, 400), bool)
+        zone[30:100, 60:150] = True
+        cx, cy, _, _ = fiska.locate_bobber(pre, post, k=7, allowed=zone)
+        self.assertLessEqual(abs(cx - 103), 3)
+        self.assertLessEqual(abs(cy - 63), 3)
+
     def test_existing_bobber_of_neighbour_is_ignored(self):
         """A bobber that was already there before our cast is not 'new'."""
         rng = np.random.default_rng(3)
@@ -242,8 +259,9 @@ class FakeGame:
     dry=True: the 'player' casts by themself and reels in 0.6 s after the bite.
     """
 
-    def __init__(self, own_splash, dry=False, lure=False, intruder=False):
-        self.own_splash, self.dry, self.lure, self.intruder = own_splash, dry, lure, intruder
+    def __init__(self, own_splash, dry=False, lure=False, intruder=False, bite_len=0.5, water=1.0, ramp=False):
+        self.own_splash, self.dry, self.lure, self.intruder, self.ramp = own_splash, dry, lure, intruder, ramp
+        self.bite_len, self.water = bite_len, water
         self.fishing = False
         self.casting_until = 0.0
         self.loot_until = 0.0
@@ -258,7 +276,7 @@ class FakeGame:
 
     def _cast(self, now):
         self.fishing, self.cast_at = True, now
-        self.splash_at = now + 2.5
+        self.splash_at = now + 4.0
 
     def _reel(self, now):
         self.fishing = False
@@ -293,10 +311,12 @@ class FakeGame:
     def grab_gray(self, left, top, w, h):
         now = fiska.time.monotonic()
         with self.lock:
-            f = 90 + self.rng.normal(0, 1, (h // 2, w // 2)).astype(np.float32)
-            if w <= 300 and self.splash_at and 0 <= now - self.splash_at < 0.5:
+            f = 90 + self.rng.normal(0, self.water if w <= 300 else 1, (h // 2, w // 2)).astype(np.float32)
+            if w <= 300 and self.splash_at and 0 <= now - self.splash_at < self.bite_len:
                 if self.intruder:      # a pet flies through the box instead
                     f += self.rng.normal(0, 15, f.shape).astype(np.float32)
+                elif self.ramp:        # something walks in: starts small, keeps growing
+                    f += self.rng.normal(0, 2 + 40 * (now - self.splash_at), f.shape).astype(np.float32)
                 elif self.own_splash:  # bite at our bobber: ~3x calm, like the recordings
                     f += self.rng.normal(0, 3, f.shape).astype(np.float32)
         if w > 300 and self.fishing and now - self.cast_at > 0.1:       # search region
@@ -318,7 +338,7 @@ class FakeGame:
 
 class FlowTest(unittest.TestCase):
     def run_casts(self, game, extra=(), casts=1):
-        argv = ["--grace", "0.3", "--timeout", "5", "--loot-min", "0", "--loot-max", "0",
+        argv = ["--grace", "0.3", "--timeout", "7", "--loot-min", "0", "--loot-max", "0",
                 "--reaction-min", "0", "--reaction-max", "0", "--bobber-min", "4", "--window", ""]
         args = fiska.parse_args(argv + list(extra))
         orig = (fiska.press_key, fiska.game_window, fiska.client_box, fiska.Screen, fiska.Listener)
@@ -347,6 +367,32 @@ class FlowTest(unittest.TestCase):
     def test_something_passing_the_box_is_not_a_bite(self):
         s = self.run_casts(FakeGame(own_splash=False, intruder=True))
         self.assertEqual((s["caught"], s["no_loot"], s["no_bite"]), (0, 0, 1), s)
+
+    def test_intruder_that_ramps_up_under_the_cap_is_not_a_bite(self):
+        s = self.run_casts(FakeGame(own_splash=False, ramp=True))
+        self.assertEqual((s["caught"], s["no_loot"]), (0, 0), s)
+
+    def test_blip_that_does_not_hold_is_not_a_bite(self):
+        s = self.run_casts(FakeGame(own_splash=True, bite_len=0.12))
+        self.assertEqual((s["caught"], s["no_loot"]), (0, 0), s)
+
+    def test_box_that_is_not_water_is_recast(self):
+        game = FakeGame(own_splash=True, water=0.0)    # a static spot: wood, UI
+        s = self.run_casts(game)
+        self.assertEqual((s["not_water"], s["caught"]), (1, 0), s)
+        self.assertEqual(game.presses, 2)              # cast, then reel in to recast
+
+    def test_record_writes_csv_log_and_pictures(self):
+        import csv, glob, os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.run_casts(FakeGame(own_splash=True), extra=["--record", d])
+            with open(os.path.join(d, "casts.csv"), encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+            self.assertEqual([r["outcome"] for r in rows], ["caught"])
+            self.assertTrue(rows[0]["bobber_x"] and rows[0]["calm"] and rows[0]["level"])
+            self.assertTrue(glob.glob(os.path.join(d, "cast0001_bobber.png")))
+            self.assertTrue(glob.glob(os.path.join(d, "cast0001_bite.png")))
+            self.assertTrue(glob.glob(os.path.join(d, "cast0001.npz")))
 
     def test_lure_cast_is_waited_out(self):
         game = FakeGame(own_splash=True, lure=True)
