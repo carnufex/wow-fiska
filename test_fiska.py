@@ -35,6 +35,41 @@ class LocateBobber(unittest.TestCase):
         _, _, score, _ = fiska.locate_bobber(pre, post, k=7)
         self.assertLess(score, 6.0)
 
+    def test_moving_npc_loses_to_still_bobber(self):
+        """A walking NPC changes a lot but keeps changing; the bobber sits still."""
+        rng = np.random.default_rng(6)
+        pre = [water(rng) for _ in range(3)]
+        post = [water(rng) for _ in range(4)]
+        for i, f in enumerate(post):
+            f[60:90, 20 + 4 * i:40 + 4 * i] = 15     # NPC walking right across the frame
+            f[30:37, 150:157] = 230                   # our bobber
+        cx, cy, _, _ = fiska.locate_bobber(pre, post, k=7)
+        self.assertLessEqual(abs(cx - 153), 3)
+        self.assertLessEqual(abs(cy - 33), 3)
+
+    def test_red_feather_beats_bigger_shifted_npc(self):
+        """An NPC that shifted a bit between pre and post (then stood still) gives a
+        bigger gray change than the small bobber; the newly appeared red wins."""
+        rng = np.random.default_rng(8)
+
+        def scene(npc_x, bobber):
+            f = np.empty((120, 200, 3), np.float32)
+            f[...] = (70, 60, 140)                                   # blue-purple water
+            f += rng.normal(0, 4, f.shape).astype(np.float32)
+            f[50:100, npc_x:npc_x + 25] = (40, 35, 60)               # dark NPC
+            if bobber:
+                f[30:34, 150:155] = (120, 75, 80)                    # dull red feather
+                f[34:38, 151:154] = (190, 150, 140)                  # beige cork
+            return f
+
+        pre = [scene(20, False) for _ in range(3)]
+        post = [scene(40, True) for _ in range(4)]                   # NPC moved 20 px
+        cx_gray, _, _, _ = fiska.locate_bobber(pre, post, k=7, red_weight=0)
+        cx, cy, _, _ = fiska.locate_bobber(pre, post, k=7)
+        self.assertLess(cx_gray, 100, "sanity: gray alone picks the NPC")
+        self.assertLessEqual(abs(cx - 152), 4)
+        self.assertLessEqual(abs(cy - 33), 5)
+
     def test_existing_bobber_of_neighbour_is_ignored(self):
         """A bobber that was already there before our cast is not 'new'."""
         rng = np.random.default_rng(3)
@@ -120,37 +155,50 @@ class Keys(unittest.TestCase):
         self.assertEqual(ctypes.sizeof(fiska.INPUT), 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class FakeGame:
-    """Simulated game: bobber appears on cast, splash (audio + optional motion) later."""
+    """Simulated game: bobber appears on cast, splash (audio + optional motion) later.
 
-    def __init__(self, own_splash):
+    dry=True: the 'player' casts by themself after a few frames and reels in
+    0.6 s after the splash (catching a fish only if it was their own splash).
+    """
+
+    def __init__(self, own_splash, dry=False):
         self.own_splash = own_splash
+        self.dry = dry
         self.fishing = False
         self.loot_until = 0.0
         self.cast_at = None
         self.splash_at = None
         self.audio_sent = False
+        self.idle_polls = 0
         self.rng = np.random.default_rng(7)
         self.ds = 2
+
+    def _cast(self, now):
+        self.fishing, self.cast_at = True, now
+        self.splash_at = now + 1.2
+
+    def _reel(self, now):
+        self.fishing = False
+        if self.own_splash:
+            self.loot_until = now + 1.5
 
     # fiska.press_key
     def press(self, vk):
         now = fiska.time.monotonic()
-        if not self.fishing:
-            self.fishing, self.cast_at = True, now
-            self.splash_at = now + 1.2
-        else:
-            self.fishing = False
-            if self.own_splash:
-                self.loot_until = now + 1.5
+        self._reel(now) if self.fishing else self._cast(now)
 
     # Screen API
     def bridge(self, box):
-        return {"fishing": self.fishing, "loot": fiska.time.monotonic() < self.loot_until}
+        now = fiska.time.monotonic()
+        if self.dry:
+            if self.cast_at is None:
+                self.idle_polls += 1
+                if self.idle_polls > 5:
+                    self._cast(now)
+            elif self.fishing and now > self.splash_at + 0.6:
+                self._reel(now)
+        return {"fishing": self.fishing, "loot": now < self.loot_until}
 
     def grab_gray(self, left, top, w, h):
         now = fiska.time.monotonic()
@@ -162,6 +210,9 @@ class FakeGame:
             f += self.rng.normal(0, 40, f.shape).astype(np.float32)  # splash at our bobber
         return f
 
+    def grab_rgb(self, left, top, w, h):
+        return np.repeat(self.grab_gray(left, top, w, h)[..., None], 3, axis=2)
+
     # Listener API
     def drain(self):
         now = fiska.time.monotonic()
@@ -172,25 +223,23 @@ class FakeGame:
 
 
 class FlowTest(unittest.TestCase):
-    def run_cast(self, own_splash):
-        game = FakeGame(own_splash)
-        args = fiska.parse_args(["--grace", "0.3", "--timeout", "3", "--loot-min", "0",
-                                 "--loot-max", "0", "--reaction-min", "0", "--reaction-max", "0",
-                                 "--bobber-min", "4", "--window", ""])
-        f = fiska.Fisher.__new__(fiska.Fisher)
-        f.args, f.key, f.toggle = args, 0x79, type("T", (), {"pressed": lambda self: False})()
-        f.screen, f.listener = game, game
-        f.splash = fiska.SplashDetector(args.threshold, args.margin)
-        f.running, f.waiting_logged, f.cast_no = True, False, 0
-        f.stats = {"caught": 0, "no_bite": 0, "no_loot": 0, "ignored": 0, "lure": 0}
-        orig = (fiska.press_key, fiska.game_window, fiska.client_box)
+    def run_cast(self, own_splash, dry=False):
+        game = FakeGame(own_splash, dry)
+        argv = ["--grace", "0.3", "--timeout", "3", "--loot-min", "0", "--loot-max", "0",
+                "--reaction-min", "0", "--reaction-max", "0", "--bobber-min", "4", "--window", ""]
+        args = fiska.parse_args(argv + (["--dry-run"] if dry else []))
+        orig = (fiska.press_key, fiska.game_window, fiska.client_box, fiska.Screen, fiska.Listener)
         fiska.press_key = game.press
         fiska.game_window = lambda title: 1
         fiska.client_box = lambda hwnd: (0, 0, 1000, 1000)
+        fiska.Screen = lambda: game
+        fiska.Listener = lambda device=None: game
         try:
+            f = fiska.Fisher(args)
             f.cast_once()
         finally:
-            fiska.press_key, fiska.game_window, fiska.client_box = orig
+            (fiska.press_key, fiska.game_window, fiska.client_box,
+             fiska.Screen, fiska.Listener) = orig
         return f.stats
 
     def test_own_splash_is_caught(self):
@@ -203,3 +252,11 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(s["caught"], 0, s)
         self.assertEqual(s["ignored"], 1, s)
         self.assertEqual(s["no_bite"], 1, s)
+
+    def test_dry_run_scores_your_own_catch(self):
+        s = self.run_cast(own_splash=True, dry=True)
+        self.assertEqual((s["dry_hit"], s["dry_missed"], s["dry_false"]), (1, 0, 0), s)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -32,12 +32,15 @@ In SBF's options, enable **focus audio** (mutes music/ambience while fishing).
 
 ```bash
 .venv\Scripts\python fiska.py --calibrate     # audio peak meter + addon status
-.venv\Scripts\python fiska.py --dry-run --debug-dir debug   # you fish, it logs when it WOULD reel in
+.venv\Scripts\python fiska.py --dry-run --debug-dir debug --record rec   # you fish, it scores itself
 .venv\Scripts\python fiska.py                 # fish; Pause = start/pause
 ```
 
 Keys are only sent while the foreground window title contains "World of Warcraft".
 `debug/castNNNN_found.png` shows where the bobber was found each cast (red square).
+In `--dry-run` every reel-in is scored (DETECTED / MISSED / false alarms) and the log shows the
+loudest sound and largest bobber motion just before you reeled in. `--record` saves per-cast
+traces and the pre/post frames (`rec/castNNNN.npz`) for offline tuning.
 Tune with `--threshold`, `--margin`, `--search`, `--exclude`, `--bobber-min`; see `--help`.
 
 ## Tests
