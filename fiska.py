@@ -220,7 +220,8 @@ class Screen:
         if b < 200 or (60 < r < 200) or (60 < g < 200):
             return None
         b2, _, r2 = px(9 * unit)
-        return {"fishing": r >= 200, "loot": g >= 200, "casting": b2 >= 200 and r2 >= 200}
+        return {"fishing": r >= 200, "loot": g >= 200, "casting": b2 >= 200 and r2 >= 200,
+                "v11": b2 >= 200}
 
 
 class FrameRing(threading.Thread):
@@ -353,18 +354,30 @@ class MotionTracker:
 
     A bite = the median change over the last `window` seconds reaches
     max(base * ratio, base + delta), where base is the median over the
-    `base_s` seconds before that (minus a `gap`). Fitted on recorded casts:
-    calm water peaks at ~0.7 of that threshold, a bite at 1.2-1.6 of it,
-    ~0.6 s before a human reacted.
+    `base_s` seconds before that (minus a `gap`).
+
+    Fitted on 46 recorded bites (2 dry runs + one 12-minute live run):
+    - ratio 2.2 / delta 0.8: calm water peaks at 0.82 of the threshold, and a
+      weak bite on a far-away bobber (median 1.6-1.7 on calm 0.67) is caught;
+    - warmup 1.5 s: right after landing the bobber still settles, and the
+      baseline is too short (earliest real bite seen: 3.4 s after listening);
+    - cap 4.5: every real bite peaked at 2.2-3.6 in the trigger window. Bigger
+      bursts were something passing through the box - a pet, a nameplate, the
+      rod's lure glow - and every one of those reel-ins came up empty.
     """
 
-    def __init__(self, ratio, delta, window=0.1, base_s=3.0, gap=0.3):
+    def __init__(self, ratio, delta, window=0.1, base_s=3.0, gap=0.3, warmup=1.5,
+                 cap=4.5, peak_window=0.15):
         self.ratio, self.delta, self.window = ratio, delta, window
-        self.base_s, self.gap = base_s, gap
+        self.base_s, self.gap, self.warmup = base_s, gap, warmup
+        self.cap, self.peak_window = cap, peak_window
         self.samples = deque()
         self.prev = None
+        self.t0 = None
 
     def feed(self, t, frame):
+        if self.t0 is None:
+            self.t0 = t
         if self.prev is not None and self.prev.shape == frame.shape:
             self.samples.append((t, float(np.mean(np.abs(frame - self.prev)))))
             while self.samples and t - self.samples[0][0] > self.base_s + self.gap + 1.0:
@@ -372,7 +385,10 @@ class MotionTracker:
         self.prev = frame
 
     def check(self, now):
-        """(hit, level, threshold, base), or None while there is too little history."""
+        """(verdict, level, threshold, base, peak) or None while there is too
+        little history. verdict: 'bite', 'burst' (over the cap) or None."""
+        if self.t0 is None or now - self.t0 < self.warmup:
+            return None
         recent = [m for t, m in self.samples if t > now - self.window]
         before = [m for t, m in self.samples
                   if now - self.gap - self.base_s < t <= now - self.gap]
@@ -381,7 +397,14 @@ class MotionTracker:
         base = float(np.median(before))
         level = float(np.median(recent))
         threshold = max(base * self.ratio, base + self.delta)
-        return level >= threshold, level, threshold, base
+        peak = max(m for t, m in self.samples if t > now - self.peak_window)
+        if level < threshold:
+            verdict = None
+        elif self.cap and peak > self.cap:
+            verdict = "burst"
+        else:
+            verdict = "bite"
+        return verdict, level, threshold, base, peak
 
 
 # --------------------------------------------------------------------------
@@ -503,6 +526,7 @@ class Fisher:
         self.cast_no = 0
         self.trace_audio, self.trace_motion, self.bites = [], [], []
         self.rec_frames = None
+        self.clips = []
         self.ring = None
         for d in (args.debug_dir, args.record):
             if d:
@@ -593,11 +617,18 @@ class Fisher:
         --confirm audio (or no bobber with --no-bobber audio) uses sound only.
         """
         a = self.args
-        motion = MotionTracker(a.motion_ratio, a.motion_min, a.motion_window) if bobber else None
+        motion = (MotionTracker(a.motion_ratio, a.motion_min, a.motion_window,
+                                warmup=a.motion_warmup, cap=a.motion_cap) if bobber else None)
         audio_only = motion is None
         last_block = time.monotonic()
         last_splash = -1e9
         last_note = 0.0
+        quiet_until = 0.0              # after a burst, let the box settle
+        clip = deque(maxlen=150)       # ~1.8 s of bobber-box frames, for --record
+
+        def keep_clip(kind, t):
+            if self.args.record and len(self.clips) < 4:
+                self.clips.append((kind, t, [ct for ct, _ in clip], [f for _, f in clip]))
 
         def bite(t, msg):
             """Real run: stop here. Dry run: note it and keep listening."""
@@ -605,6 +636,7 @@ class Fisher:
                 return False  # same burst
             log(("[dry] would reel in: " if a.dry_run else "") + msg)
             self.bites.append(t)
+            keep_clip("bite", t)
             return not a.dry_run
 
         while time.monotonic() - cast_at < a.timeout:
@@ -636,13 +668,22 @@ class Fisher:
                 time.sleep(0.01)
                 continue
 
-            motion.feed(now, self.screen.grab_gray(*bobber))
+            frame = self.screen.grab_gray(*bobber)
+            motion.feed(now, frame)
             if motion.samples:
                 self.trace_motion.append(motion.samples[-1])
+            if self.args.record:
+                clip.append((now, np.clip(frame, 0, 255).astype(np.uint8)))
             result = motion.check(now)
-            if not result or not result[0]:
+            if not result or not result[0] or now < quiet_until:
                 continue
-            _, level, threshold, base = result
+            verdict, level, threshold, base, peak = result
+            if verdict == "burst":
+                log(f"something passed through the bobber box (peak {peak:.1f} > cap "
+                    f"{a.motion_cap}) - not a bite, ignored")
+                keep_clip("burst", now)
+                quiet_until = now + 0.5
+                continue
             if a.confirm == "both" and now - last_splash > 0.8:
                 if now - last_note > 1.0:
                     log(f"bobber moved ({level:.1f}) but no splash heard - ignored")
@@ -707,6 +748,7 @@ class Fisher:
 
         self.trace_audio, self.trace_motion, self.bites = [], [], []
         self.rec_frames = None
+        self.clips = []
         time.sleep(max(0.0, a.grace - (time.monotonic() - cast_at)))
         bobber = None
         if use_vision and pre is not None:
@@ -815,7 +857,19 @@ class Fisher:
             bobber=np.array(bobber if bobber else (-1, -1, 0, 0)),
             audio=np.array(self.trace_audio or [(0.0, SILENCE_DB)]),
             motion=np.array(self.trace_motion or [(0.0, 0.0)]),
-            bites=np.array(self.bites, dtype=float))
+            bites=np.array(self.bites, dtype=float),
+            **self.clip_arrays())
+
+    def clip_arrays(self):
+        """Bobber-box frames around each bite/burst: clipN_kind, clipN_t, clipN_times, clipN_frames."""
+        out = {}
+        for i, (kind, t, times, frames) in enumerate(self.clips):
+            if frames and all(f.shape == frames[0].shape for f in frames):
+                out[f"clip{i}_kind"] = np.array(kind)
+                out[f"clip{i}_t"] = np.array(t)
+                out[f"clip{i}_times"] = np.array(times)
+                out[f"clip{i}_frames"] = np.stack(frames)
+        return out
 
     def run(self):
         a = self.args
@@ -832,6 +886,10 @@ class Fisher:
                 if has_bridge != bridge_logged:
                     log("FiskaSignal addon: " + ("detected" if has_bridge else
                         "NOT detected - using timeouts, no loot confirmation"))
+                    state = self.screen.bridge(client_box(hwnd)) if has_bridge else None
+                    if state is not None and not state["v11"]:
+                        log("FiskaSignal is the OLD version (no 'casting' square): lure/bait casts "
+                            "are not waited out - /reload in game to load 1.1")
                     bridge_logged = has_bridge
                 self.cast_once()
             else:
@@ -894,8 +952,12 @@ def parse_args(argv=None):
                    help="when the bobber is not found: reel in and recast (default) or use sound")
     g.add_argument("--threshold", type=float, default=-50.0, help="splash level floor, dBFS (default -50)")
     g.add_argument("--margin", type=float, default=12.0, help="dB above background (default 12)")
-    g.add_argument("--motion-ratio", type=float, default=2.5, help="bite = motion this many times calm (default 2.5)")
-    g.add_argument("--motion-min", type=float, default=1.0, help="...and at least this much above calm (default 1.0)")
+    g.add_argument("--motion-ratio", type=float, default=2.2, help="bite = motion this many times calm (default 2.2)")
+    g.add_argument("--motion-min", type=float, default=0.8, help="...and at least this much above calm (default 0.8)")
+    g.add_argument("--motion-cap", type=float, default=4.5,
+                   help="a burst peaking above this is something passing through the box, not a bite (default 4.5; 0 = off)")
+    g.add_argument("--motion-warmup", type=float, default=1.5,
+                   help="no bites in the first seconds of watching, while the bobber settles (default 1.5)")
     g.add_argument("--motion-window", type=float, default=0.1, help="seconds of motion the bite median spans (default 0.1)")
 
     g = p.add_argument_group("bobber search (fractions of the game window)")

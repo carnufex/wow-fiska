@@ -134,9 +134,25 @@ class Motion(unittest.TestCase):
         rng = np.random.default_rng(4)
         tr = fiska.MotionTracker(ratio=2.5, delta=1.0)
         self.feed(tr, rng, 0.0, 4.0, amp=0.5)
-        t = self.feed(tr, rng, 4.0, 4.15, amp=3.0)
-        hit, level, threshold, base = tr.check(t)
-        self.assertTrue(hit, (level, threshold, base))
+        t = self.feed(tr, rng, 4.0, 4.15, amp=2.0)
+        verdict, level, threshold, base, peak = tr.check(t)
+        self.assertEqual(verdict, "bite", (level, threshold, base, peak))
+
+    def test_burst_over_cap_is_not_a_bite(self):
+        """Something passing through the box (a pet, a nameplate) moves far
+        more than a bobber ever does."""
+        rng = np.random.default_rng(11)
+        tr = fiska.MotionTracker(ratio=2.2, delta=0.8, cap=4.5)
+        self.feed(tr, rng, 0.0, 4.0, amp=0.5)
+        t = self.feed(tr, rng, 4.0, 4.15, amp=8.0)
+        self.assertEqual(tr.check(t)[0], "burst")
+
+    def test_no_bite_during_warmup(self):
+        rng = np.random.default_rng(12)
+        tr = fiska.MotionTracker(ratio=2.2, delta=0.8, warmup=1.5, base_s=0.5, gap=0.1)
+        self.feed(tr, rng, 0.0, 1.0, amp=0.5)
+        t = self.feed(tr, rng, 1.0, 1.15, amp=2.0)    # settling bobber, 1.15 s in
+        self.assertIsNone(tr.check(t))
 
     def test_calm_water_and_single_flicker_are_not_a_bite(self):
         rng = np.random.default_rng(5)
@@ -144,8 +160,7 @@ class Motion(unittest.TestCase):
         t = self.feed(tr, rng, 0.0, 4.0, amp=0.5)
         tr.feed(t + 0.0125, 100 + rng.normal(0, 8, (30, 30)).astype(np.float32))  # one-frame flicker
         t = self.feed(tr, rng, t + 0.025, t + 0.06, amp=0.5)
-        hit, *_ = tr.check(t)
-        self.assertFalse(hit)
+        self.assertIsNone(tr.check(t)[0])
 
     def test_not_enough_history(self):
         tr = fiska.MotionTracker(ratio=2.5, delta=1.0)
@@ -185,7 +200,7 @@ class Bridge(unittest.TestCase):
         return s.bridge((0, 0, 1000, h))
 
     def test_states(self):
-        idle = {"fishing": False, "loot": False, "casting": False}
+        idle = {"fishing": False, "loot": False, "casting": False, "v11": True}
         self.assertEqual(self.state((255, 0, 0)), idle)
         self.assertEqual(self.state((255, 0, 255)), dict(idle, fishing=True))
         self.assertEqual(self.state((255, 255, 0)), dict(idle, loot=True))
@@ -196,7 +211,9 @@ class Bridge(unittest.TestCase):
         self.assertIsNone(self.state((255, 128, 0)))      # ambiguous colour
 
     def test_old_addon_without_second_square(self):
-        self.assertFalse(self.state((255, 0, 255), (60, 70, 80))["casting"])
+        state = self.state((255, 0, 255), (60, 70, 80))
+        self.assertFalse(state["casting"])
+        self.assertFalse(state["v11"])
 
 
 class Keys(unittest.TestCase):
@@ -225,8 +242,8 @@ class FakeGame:
     dry=True: the 'player' casts by themself and reels in 0.6 s after the bite.
     """
 
-    def __init__(self, own_splash, dry=False, lure=False):
-        self.own_splash, self.dry, self.lure = own_splash, dry, lure
+    def __init__(self, own_splash, dry=False, lure=False, intruder=False):
+        self.own_splash, self.dry, self.lure, self.intruder = own_splash, dry, lure, intruder
         self.fishing = False
         self.casting_until = 0.0
         self.loot_until = 0.0
@@ -271,14 +288,17 @@ class FakeGame:
             elif self.fishing and now > self.splash_at + 0.6:
                 self._reel(now)
         return {"fishing": self.fishing, "loot": now < self.loot_until,
-                "casting": now < self.casting_until}
+                "casting": now < self.casting_until, "v11": True}
 
     def grab_gray(self, left, top, w, h):
         now = fiska.time.monotonic()
         with self.lock:
             f = 90 + self.rng.normal(0, 1, (h // 2, w // 2)).astype(np.float32)
-            if w <= 300 and self.own_splash and self.splash_at and 0 <= now - self.splash_at < 0.5:
-                f += self.rng.normal(0, 20, f.shape).astype(np.float32)   # bite at our bobber
+            if w <= 300 and self.splash_at and 0 <= now - self.splash_at < 0.5:
+                if self.intruder:      # a pet flies through the box instead
+                    f += self.rng.normal(0, 15, f.shape).astype(np.float32)
+                elif self.own_splash:  # bite at our bobber: ~3x calm, like the recordings
+                    f += self.rng.normal(0, 3, f.shape).astype(np.float32)
         if w > 300 and self.fishing and now - self.cast_at > 0.1:       # search region
             f[100:106, 50:56] = 230                                     # our bobber, upper-left
         fiska.time.sleep(0.005)
@@ -323,6 +343,10 @@ class FlowTest(unittest.TestCase):
     def test_neighbour_splash_is_not_a_bite(self):
         s = self.run_casts(FakeGame(own_splash=False))
         self.assertEqual((s["caught"], s["no_bite"]), (0, 1), s)
+
+    def test_something_passing_the_box_is_not_a_bite(self):
+        s = self.run_casts(FakeGame(own_splash=False, intruder=True))
+        self.assertEqual((s["caught"], s["no_loot"], s["no_bite"]), (0, 0, 1), s)
 
     def test_lure_cast_is_waited_out(self):
         game = FakeGame(own_splash=True, lure=True)
