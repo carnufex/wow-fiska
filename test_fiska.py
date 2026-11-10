@@ -275,6 +275,7 @@ def bare_fisher(argv=()):
     f = fiska.Fisher.__new__(fiska.Fisher)
     f.args = fiska.parse_args(["--state", ""] + list(argv))
     f.landings, f.window_size, f.cur, f.cast_no = fiska.deque(maxlen=20), None, {}, 0
+    f.prior_off = False
     f.screen = type("S", (), {"ds": 2})()
     return f
 
@@ -334,6 +335,39 @@ class NewSpot(unittest.TestCase):
         cy = (box[1] + box[3] // 2 - 144) // 2
         self.assertLessEqual(abs(cx - 420), 3, lines)
         self.assertLessEqual(abs(cy - 200), 3, lines)
+
+    def test_usual_area_beats_an_npc_off_to_the_side(self):
+        """Before any catch: an idling NPC on the dock (bigger change) loses to the
+        bobber straight ahead, because the usual area is searched first."""
+        rng = np.random.default_rng(6)
+        f = bare_fisher()
+        f.window_size = [2560, 1440]
+        region = fiska.frac_box((0, 0, 2560, 1440), f.args.search)
+        pre = [self.scene(rng) for _ in range(3)]
+        post = [self.scene(rng, (575, 200)) for _ in range(4)]      # screen (1278, 544)
+        for p in pre:
+            p[160:215, 180:200] = 60                                  # NPC, one pose
+        for p in post:
+            p[160:215, 184:204] = 45                                  # ...shifted and darker
+        mask, where = f.landing_zone(region, pre[0].shape)
+        self.assertEqual(where, "usual area")
+        cx, cy, _, _ = f.search_spot(pre, post, mask)
+        self.assertLessEqual(abs(cx - 575), 3)
+        self.assertLessEqual(abs(cy - 200), 3)
+        _, where = bare_fisher(["--prior", "off"]).landing_zone(region, pre[0].shape)
+        self.assertIsNone(where)
+
+    def test_one_lucky_catch_on_an_npc_does_not_stretch_the_zone(self):
+        f = bare_fisher()
+        f.window_size = [2560, 1440]
+        region = fiska.frac_box((0, 0, 2560, 1440), f.args.search)
+        rng = np.random.default_rng(1)
+        f.landings.extend((1300 + rng.normal(0, 25), 540 + rng.normal(0, 25)) for _ in range(9))
+        f.landings.append((494.0, 538.0))                             # the NPC "catch"
+        mask, where = f.landing_zone(region, (418, 1024))
+        self.assertEqual(where, "landing zone")
+        self.assertTrue(mask[(540 - 144) // 2, (1300 - 128) // 2])
+        self.assertFalse(mask[(538 - 144) // 2, (494 - 128) // 2])
 
     def test_zone_from_another_spot_is_forgotten_after_three_misses(self):
         f = bare_fisher()

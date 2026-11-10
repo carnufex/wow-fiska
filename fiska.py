@@ -608,6 +608,7 @@ class Fisher:
         self.window_size = None            # the game window the landings belong to
         self.cur = {}                      # metrics of the cast in progress -> casts.csv
         self.breaks = Breaks(args.work_minutes, args.break_minutes)
+        self.prior_off = False             # the usual area failed: camera turned
         for d in (args.debug_dir, args.record):
             if d:
                 os.makedirs(d, exist_ok=True)
@@ -704,22 +705,36 @@ class Fisher:
                 log(f"could not save {self.args.state}: {err}")
 
     def landing_zone(self, region, shape):
-        """Where our bobbers have been landing (from casts that caught a fish),
-        as an allowed-mask in search-frame coordinates; None until 5 catches.
-        Other players walking on the dock or standing still after moving look
-        'new and still' too, and outscored the bobber 8 times in one session."""
-        if len(self.landings) < 5:
-            return None
-        pts = np.array(self.landings, dtype=float)
-        med = np.median(pts, axis=0)
-        dev = np.abs(pts - med).max(axis=0)
-        floor = self.args.zone_min * region[3] / (self.args.search[3] - self.args.search[1])
-        half_x, half_y = max(1.5 * dev[0], floor), max(1.5 * dev[1], floor)
+        """(allowed-mask in search-frame coordinates, name) or (None, None).
+
+        'landing zone': where our bobbers have been landing (casts that caught
+        a fish), after 5 catches. Other players walking on the dock or standing
+        still after moving look 'new and still' too, and outscored the bobber
+        8 times in one session. The zone is median +- 3 robust sigmas (MAD):
+        one lucky "catch" on an NPC once stretched a max-deviation zone over
+        half the screen, and the NPC won the next casts.
+
+        'usual area' (--prior) until then: with the camera behind the character
+        the bobber lands straight ahead, at the same place on screen at every
+        spot so far (492 catches at 3 spots: x 0.46-0.54, y 0.30-0.50)."""
         ds = self.screen.ds
         h, w = shape
         xs = (region[0] + np.arange(w) * ds)[None, :]
         ys = (region[1] + np.arange(h) * ds)[:, None]
-        return (np.abs(xs - med[0]) <= half_x) & (np.abs(ys - med[1]) <= half_y)
+        if len(self.landings) >= 5:
+            pts = np.array(self.landings, dtype=float)
+            med = np.median(pts, axis=0)
+            spread = 3 * 1.4826 * np.median(np.abs(pts - med), axis=0)
+            floor = self.args.zone_min * region[3] / (self.args.search[3] - self.args.search[1])
+            half_x, half_y = max(spread[0], floor), max(spread[1], floor)
+            return (np.abs(xs - med[0]) <= half_x) & (np.abs(ys - med[1]) <= half_y), "landing zone"
+        if self.args.prior and not self.prior_off and self.window_size:
+            x1, y1, x2, y2 = self.args.prior
+            W, H = self.window_size
+            win_x, win_y = region[0] - self.args.search[0] * W, region[1] - self.args.search[1] * H
+            return ((xs >= win_x + x1 * W) & (xs <= win_x + x2 * W) &
+                    (ys >= win_y + y1 * H) & (ys <= win_y + y2 * H)), "usual area"
+        return None, None
 
     def search_spot(self, pre, post, zone):
         """Best (cx, cy, score, k) over the bobber sizes (--bobber-scales).
@@ -749,14 +764,14 @@ class Fisher:
         in the air when the first frames were taken (line going up, no bobber)."""
         a = self.args
         h, w = pre[0].shape[:2]
-        zone = self.landing_zone(region, (h, w))
-        where = "everywhere"
+        zone, where = self.landing_zone(region, (h, w))
         if zone is not None:
-            where = "landing zone"
             spot = self.search_spot(pre, post, zone)
             if spot[2] < a.bobber_min:
-                log(f"nothing in the usual landing zone (best {spot[2]:.1f}) - searching everywhere")
+                log(f"nothing in the {where} (best {spot[2]:.1f}) - searching everywhere")
                 zone, where = None, "everywhere"
+        else:
+            where = "everywhere"
         if zone is None:
             spot = self.search_spot(pre, post, None)
         looks = 1
@@ -1109,16 +1124,22 @@ class Fisher:
         """Forget the landing zone after --zone-reset failed casts in a row in it.
         A zone saved at one fishing spot pinned the search to the wrong part
         of the screen at the next one (the character's head, every cast)."""
+        where = self.cur.get("search")
         if outcome == "caught":
             self.zone_misses = 0
         elif outcome in ("no_bite", "empty", "not_water", "timeout") and \
-                self.cur.get("search") == "landing zone":
+                where in ("landing zone", "usual area"):
             self.zone_misses = getattr(self, "zone_misses", 0) + 1
             if self.args.zone_reset and self.zone_misses >= self.args.zone_reset:
-                log(f"{self.zone_misses} casts in a row failed in the learned landing zone - "
-                    f"probably a new fishing spot: forgetting it, searching everywhere")
-                self.landings.clear()
-                self.save_landings()
+                if where == "landing zone":
+                    log(f"{self.zone_misses} casts in a row failed in the learned landing zone - "
+                        f"probably a new fishing spot: forgetting it")
+                    self.landings.clear()
+                    self.save_landings()
+                else:
+                    log(f"{self.zone_misses} casts in a row failed in the usual area straight "
+                        f"ahead - camera turned? searching everywhere from now on")
+                    self.prior_off = True
                 self.zone_misses = 0
 
     def give_up(self, box, has_bridge, why, outcome):
@@ -1322,6 +1343,10 @@ def parse_args(argv=None):
                    help="...and at most this (default 2.5; someone walking there is ~4)")
     g.add_argument("--state", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "fiska_state.json"),
                    help="where the learned landing zone is kept between sessions ('' = do not keep)")
+    g.add_argument("--prior", type=lambda t: None if t.lower() in ("0", "off", "none") else parse_frac(t),
+                   default=(0.445, 0.24, 0.57, 0.505),
+                   help="where the bobber usually lands, window fractions x1,y1,x2,y2, searched "
+                        "first until 5 catches teach the landing zone (default 0.445,0.24,0.57,0.505; off)")
     g.add_argument("--zone-reset", type=int, default=3,
                    help="forget the landing zone after this many failed casts in a row in it (default 3; 0 = never)")
     g.add_argument("--zone-min", type=float, default=0.08,

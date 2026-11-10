@@ -22,8 +22,13 @@ So the bite is **seen** at *our* bobber. Every rule below was fitted on recorded
   just above the excluded box, won on a zoomed-out camera);
 - **landed**: the search is repeated (up to 2 more looks) until two in a row agree - on a long
   cast the bobber was still in the air when the first frames were taken;
-- **learned landing zone**: after 5 catches, only where our bobbers have been landing
-  (falls back to the whole area when nothing is there). Players walking onto the dock and
+- **usual area first**: with the camera behind the character the bobber lands straight ahead,
+  at the same place on screen at every spot so far (492 catches at 3 spots: x 0.46-0.54,
+  y 0.30-0.50 of the window). That box (`--prior`) is searched first; at a sun-lit dock an idling
+  NPC, nameplates and the glitter on the water won 12 casts out of 27 before this, and 0 after;
+- **learned landing zone**: after 5 catches, only where our bobbers have been landing - median
+  +- 3 robust sigmas, so one lucky "catch" on an NPC can't stretch it (each step falls back to
+  the next, and to the whole area, when nothing is there). Players walking onto the dock and
   stopping outscored the bobber 8 times in one session before this. The zone is saved between
   sessions; 3 failed casts in a row in it (a new fishing spot) and it is forgotten and learned
   again;
