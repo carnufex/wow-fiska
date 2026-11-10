@@ -463,6 +463,78 @@ class Console(unittest.TestCase):
             f.ready()
 
 
+class FrameEditing(unittest.TestCase):
+    """Dragging the frames on the overlay (no window: the handlers are driven
+    with fake mouse events)."""
+
+    def setUp(self):
+        import fiska_gui
+        self.gui = fiska_gui
+        self.saved = []
+        fiska_gui.save_settings = lambda s: self.saved.append(dict(s))
+        app = fiska_gui.App.__new__(fiska_gui.App)
+        app.settings, app.argv, app.editing = {"toggle": "pause", "overlay": True}, [], True
+        app.args = app.make_args()
+        app.fisher = bare_fisher()
+        app.fisher.args = app.args
+        self.app = app
+        self.overlay = fiska_gui.Overlay(app)
+        self.overlay.box = (0, 0, 2560, 1440)
+        self.log = fiska.log
+        fiska.log = lambda m: None
+
+    def tearDown(self):
+        fiska.log = self.log
+        import importlib
+        importlib.reload(self.gui)                                  # undo the save_settings stub
+
+    def ev(self, x, y):
+        return type("E", (), {"x": x, "y": y})()
+
+    def test_hit_test_finds_edges_corners_and_inside(self):
+        frames = {"prior": (0.4, 0.3, 0.6, 0.5), "search": (0.05, 0.1, 0.85, 0.68),
+                  "exclude": (0.46, 0.52, 0.56, 1.0)}
+        W, H = 1000, 1000
+        self.assertEqual(self.gui.hit_test(frames, 400, 400, W, H), ("prior", {"l"}))
+        self.assertEqual(self.gui.hit_test(frames, 600, 300, W, H), ("prior", {"r", "t"}))
+        self.assertEqual(self.gui.hit_test(frames, 500, 400, W, H), ("prior", {"move"}))
+        self.assertEqual(self.gui.hit_test(frames, 200, 400, W, H), ("search", {"move"}))
+        self.assertEqual(self.gui.hit_test(frames, 52, 400, W, H), ("search", {"l"}))
+        self.assertIsNone(self.gui.hit_test(frames, 950, 950, W, H))
+
+    def test_drag_stays_inside_and_keeps_a_minimum_size(self):
+        self.assertEqual(self.gui.drag((0.4, 0.3, 0.6, 0.5), {"move"}, 0.9, 0.0)[2], 1.0)
+        x1, _, x2, _ = self.gui.drag((0.4, 0.3, 0.6, 0.5), {"l"}, 0.5, 0.0)
+        self.assertAlmostEqual(x2 - x1, self.gui.MIN_FRAC)
+
+    def test_dragging_the_usual_area_moves_it_for_the_fisher_and_saves_it(self):
+        f = self.app.fisher
+        f.landings.extend([(1300.0, 540.0)] * 6)
+        f.prior_off = True
+        x1, y1 = self.app.args.prior[0] * 2560, self.app.args.prior[1] * 1440
+        self.overlay.on_press(self.ev(x1 + 100, y1 + 100))        # inside: move
+        self.overlay.on_drag(self.ev(x1 + 100, y1 + 100 + 144))   # 10 % down
+        self.overlay.on_release(self.ev(x1 + 100, y1 + 100 + 144))
+        self.assertAlmostEqual(self.app.args.prior[1], 0.34, places=3)
+        self.assertIs(f.args, self.app.args)                       # the fisher sees it
+        self.assertEqual(self.saved[-1]["prior"], list(self.app.args.prior))
+        self.assertEqual(len(f.landings), 0)                       # old zone forgotten
+        self.assertFalse(f.prior_off)
+        self.assertTrue(self.app.args.prior_locked)
+
+    def test_a_placed_usual_area_is_not_switched_off_after_misses(self):
+        f = self.app.fisher
+        self.app.args.prior_locked = True
+        for _ in range(3):
+            f.cur = {"search": "usual area"}
+            f.check_zone("no_bite")
+        self.assertFalse(f.prior_off)
+
+    def test_saved_frames_are_used_on_the_next_start(self):
+        self.app.settings["search"] = [0.1, 0.1, 0.9, 0.7]
+        self.assertEqual(self.app.make_args().search, (0.1, 0.1, 0.9, 0.7))
+
+
 class BreaksTest(unittest.TestCase):
     def make(self, work=(20, 30), rest=(5, 10)):
         return fiska.Breaks(work, rest, rand=lambda lo, hi: (lo + hi) / 2)   # 25 min / 7.5 min

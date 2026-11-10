@@ -1275,6 +1275,9 @@ class Fisher:
                         f"probably a new fishing spot: forgetting it")
                     self.landings.clear()
                     self.save_landings()
+                elif getattr(self.args, "prior_locked", False):
+                    log(f"{self.zone_misses} casts in a row failed in the usual landing area "
+                        f"you placed - check the frames (camera moved?)")
                 else:
                     log(f"{self.zone_misses} casts in a row failed in the usual area straight "
                         f"ahead - camera turned? searching everywhere from now on")

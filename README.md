@@ -95,6 +95,15 @@ lands in the yellow box, away from sun glitter, players and NPCs. The overlay is
 and excluded from screen capture (`SetWindowDisplayAffinity`), so the fisher never sees it.
 It starts paused; any `fiska.py` option can be passed (`--no-record` to not record).
 
+**Edit the frames** (tick it in the console): the overlay dims the game and takes the mouse.
+Drag an edge or corner to resize a frame, drag inside to move it. The yellow **usual landing
+area** is where the bobber is looked for first - put it around where your bobber lands; the
+gray **character** box is ignored (plus a margin), so with a steep camera that drops the bobber
+just above the head, shrink it to the body; the blue **search area** is the fallback. Changes
+apply from the next cast and are saved in `fiska_settings.json`; placing the yellow box forgets
+the learned landing zone (it is learned again from 5 catches) and keeps the box on after
+misses. *reset frames* goes back to the defaults.
+
 **Breaks**: after a random 20-30 min of fishing it rests a random 5-10 min, always between
 casts (the log says `break: 7.3 min after 24.1 min of fishing (back at 13:02)`). Pausing it
 yourself for at least 5 min counts as the break; Pause during a break stops it (PAUSED).
