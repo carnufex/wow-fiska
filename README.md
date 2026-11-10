@@ -60,6 +60,19 @@ So the bite is **seen** at *our* bobber. Every rule below was fitted on recorded
   false bites let through (15 -> 9) and lost 1 more real bite (4 of 227). Log: `only the light
   moved` / `sparkle over the bobber`; casts.csv `fine_shift`, `texture`, `light`.
 
+**Learned bite check** (`bite_model.json`, used instead of the shift/light rules when it is
+there): every recorded cast labels itself - the bite that led to a catch is a real bite, the bite
+of an empty reel-in and any earlier trigger in a cast that then caught are false. `train_bite.py`
+turns each trigger into features (how far the bobber moved, plainly and in fine structure, the
+fine-structure ratio, how centred and how bright the change is, the motion level, hold, peak and
+calm) and fits a logistic regression, checked session by session (each session judged by a model
+that never saw it) with its threshold set to keep 98.5 % of real bites. First model, 12 sessions,
+575 real / 56 false bites: real bites lost 9 vs 12 with the rules, false bites let through 9 vs
+12; on the sunset/Booty Bay sessions 3 of 42 false bites through vs 11. **It learns from every
+new recording**: run `.venv\Scripts\python train_bite.py` (or *learn from my recordings* in the
+console, while paused) after a session. `--bite-model off` uses the rules. Log: `bite  model
+0.93, ...` / `not a bite: model 0.04 < 0.15`; casts.csv `bite_p`.
+
 Every cast gets a bite before the Fishing channel ends, so a cast that ends without one is a
 **missed bite** (the log says `MISSED the bite`): so far always the search watching the wrong
 spot.

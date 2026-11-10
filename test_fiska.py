@@ -457,6 +457,36 @@ class Shift(unittest.TestCase):
         self.assertGreater(texture, 1.4)
 
 
+class BiteModelTest(unittest.TestCase):
+    def test_fit_save_load_predict(self):
+        import json, os, tempfile
+        import train_bite
+        rng = np.random.default_rng(0)
+        names = list(fiska.BITE_FEATURES)
+        X = rng.normal(0, 1, (300, len(names)))
+        y = (X[:, 0] - X[:, 2] > 0).astype(float)          # real bites: moved, not sparkly
+        mean, std = train_bite.standardise(X)
+        w, b = train_bite.fit((X - mean) / std, y)
+        model = {"features": names, "mean": mean.tolist(), "std": std.tolist(),
+                 "weights": w.tolist(), "bias": float(b), "threshold": 0.5}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "m.json")
+            with open(path, "w") as fh:
+                json.dump(model, fh)
+            m = fiska.BiteModel(path)
+        bite = dict(zip(names, [2.0, 0, -2.0] + [0] * (len(names) - 3)))
+        glitter = dict(zip(names, [-2.0, 0, 2.0] + [0] * (len(names) - 3)))
+        self.assertGreater(m.probability(bite), 0.9)
+        self.assertLess(m.probability(glitter), 0.1)
+
+    def test_the_shipped_model_loads(self):
+        import os
+        path = os.path.join(os.path.dirname(os.path.abspath(fiska.__file__)), "bite_model.json")
+        m = fiska.BiteModel(path)
+        self.assertEqual(m.features, list(fiska.BITE_FEATURES))
+        self.assertTrue(0 < m.threshold < 1)
+
+
 class Console(unittest.TestCase):
     def test_key_names_round_trip(self):
         for name in ("pause", "f5", "f12", "a", "7", "insert"):
@@ -794,6 +824,24 @@ class FlowTest(unittest.TestCase):
             self.assertTrue(glob.glob(os.path.join(d, "cast0001_bobber.png")))
             self.assertTrue(glob.glob(os.path.join(d, "cast0001_bite.png")))
             self.assertTrue(glob.glob(os.path.join(d, "cast0001.npz")))
+
+    def test_a_recorded_catch_becomes_a_training_example(self):
+        import os, tempfile
+        import train_bite
+        with tempfile.TemporaryDirectory() as d:
+            self.run_casts(FakeGame(own_splash=True), extra=["--record", d])
+            data = train_bite.collect(d, fiska.parse_args([]), log=lambda m: None)
+        self.assertEqual(len(data), 1)
+        session, cast, label, feats = data[0]
+        self.assertEqual((cast, label), ("1", 1))
+        self.assertEqual(set(feats), set(fiska.BITE_FEATURES))
+
+    def test_the_rules_still_work_without_a_model(self):
+        s = self.run_casts(FakeGame(own_splash=True), extra=["--bite-model", "off"])
+        self.assertEqual(s["caught"], 1, s)
+        s = self.run_casts(FakeGame(own_splash=False, glitter=True, bite_len=1.5),
+                           extra=["--bite-model", "off"])
+        self.assertEqual((s["caught"], s["no_loot"]), (0, 0), s)
 
     def test_lure_cast_is_waited_out(self):
         game = FakeGame(own_splash=True, lure=True)

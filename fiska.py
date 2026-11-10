@@ -434,6 +434,54 @@ def bite_texture(before, after):
     return shift, energy(after) / (energy(before) + 1e-6)
 
 
+BITE_FEATURES = ("shift", "fine_shift", "texture", "centre_change", "centre_ratio", "brighten",
+                 "level", "hold", "peak", "calm")
+
+
+def bite_features(before, after, level, threshold, base, peak, hold):
+    """What the bite model (bite_model.json, train_bite.py) looks at, for one
+    trigger: the box frames 0.4-1.0 s before it and during the 0.2 s hold,
+    and the motion numbers. Shifts are in box sizes, motion in thresholds,
+    so boxes of any size compare. None when there are too few frames."""
+    if len(before) < 5 or len(after) < 3 or not threshold:
+        return None
+    before = [np.asarray(f, np.float32) for f in before]
+    after = [np.asarray(f, np.float32) for f in after]
+    h, w = before[0].shape
+    shift = bobber_shift(before, after)
+    fine_shift, texture = bite_texture(before, after)
+    centre = (slice(h // 4, h - h // 4), slice(w // 4, w - w // 4))
+    diff = np.median(np.stack(after), axis=0) - np.median(np.stack(before), axis=0)
+    change = np.abs(diff)
+    return {
+        "shift": shift / h, "fine_shift": fine_shift / h, "texture": texture,
+        "centre_change": float(change[centre].mean()),
+        "centre_ratio": float(change[centre].mean() / (change.mean() + 1e-6)),
+        "brighten": float(np.clip(diff[centre], 0, None).mean()),
+        "level": level / threshold, "hold": hold / threshold, "peak": peak / threshold,
+        "calm": base,
+    }
+
+
+class BiteModel:
+    """Logistic regression over bite_features(), trained by train_bite.py on
+    the recorded sessions (a catch = real bite, an empty reel-in or an earlier
+    trigger in a cast that caught = false bite)."""
+
+    def __init__(self, path):
+        with open(path, encoding="utf-8") as fh:
+            m = json.load(fh)
+        self.features = m["features"]
+        self.mean, self.std = np.array(m["mean"]), np.array(m["std"])
+        self.weights, self.bias = np.array(m["weights"]), float(m["bias"])
+        self.threshold = float(m["threshold"])
+        self.info = m.get("trained_on", {})
+
+    def probability(self, feats):
+        x = (np.array([feats[k] for k in self.features]) - self.mean) / self.std
+        return float(1.0 / (1.0 + np.exp(-(x @ self.weights + self.bias))))
+
+
 class MotionTracker:
     """Frame-to-frame change inside the bobber box.
 
@@ -690,6 +738,12 @@ class Fisher:
         self.window_size = None            # the game window the landings belong to
         self.cur = {}                      # metrics of the cast in progress -> casts.csv
         self.breaks = Breaks(args.work_minutes, args.break_minutes)
+        self.bite_model = None
+        if args.bite_model and args.bite_model.lower() != "off" and os.path.exists(args.bite_model):
+            try:
+                self.bite_model = BiteModel(args.bite_model)
+            except (OSError, ValueError, KeyError) as err:
+                log(f"could not load {args.bite_model} ({err}) - using the bite rules")
         self.quit = False                  # GUI: stop the loop
         self.status = "starting"           # GUI: what the loop is doing
         self.watch_box = None              # GUI overlay: the box being watched (screen coords)
@@ -1096,7 +1150,29 @@ class Fisher:
                         last_note = now
                     continue
                 shift = None
-                if a.shift_min:
+                if self.bite_model:
+                    before = [f for t, f in clip if t0 - 1.0 < t <= t0 - 0.4]
+                    after = [f for t, f in clip if t0 < t <= now]
+                    feats = bite_features(before, after, level0, thr0, base0, peak0, hold)
+                    if feats is not None:
+                        prob = self.bite_model.probability(feats)
+                        self.cur.update(bite_p=round(prob, 3), shift=round(feats["shift"] * after[0].shape[0], 1),
+                                        texture=round(feats["texture"], 2))
+                        if prob < self.bite_model.threshold:
+                            log(f"not a bite: model {prob:.2f} < {self.bite_model.threshold:.2f} "
+                                f"(moved {feats['shift'] * after[0].shape[0]:.1f} px, "
+                                f"texture x{feats['texture']:.2f})")
+                            keep_clip("rejected", now)
+                            self.cur["still"] = self.cur.get("still", 0) + 1
+                            continue
+                        self.cur.update(level=round(level0, 2), threshold=round(thr0, 2),
+                                        peak=round(peak0, 2))
+                        if bite(t0, f"bite  model {prob:.2f}, bobber motion {level0:.1f} (threshold "
+                                    f"{thr0:.1f}, calm {base0:.1f}), held {hold:.1f}, moved "
+                                    f"{feats['shift'] * after[0].shape[0]:.1f} px"):
+                            return "bite"
+                        continue
+                if a.shift_min and not self.bite_model:
                     shift, need, fine_shift, texture = shift_now(t0, now)
                     self.cur["shift"] = round(shift, 1) if shift is not None else ""
                     if fine_shift is not None:
@@ -1137,7 +1213,7 @@ class Fisher:
 
     CSV_FIELDS = ("time", "cast", "outcome", "bobber_x", "bobber_y", "score", "search", "calm",
                   "level", "threshold", "peak", "hold_x_thr", "bursts", "blips", "duration_s",
-                  "bobber_k", "shift", "still", "fine_shift", "texture", "light")
+                  "bobber_k", "shift", "still", "fine_shift", "texture", "light", "bite_p")
 
     def cast_once(self):
         """One cast, with its outcome written to casts.csv (--record)."""
@@ -1415,6 +1491,13 @@ class Fisher:
         log(f"Key {a.key.upper()}, toggle {a.toggle.upper()}, confirm={a.confirm}, "
             f"threshold {a.threshold} dB, margin {a.margin} dB, window '{a.window}'")
         log("RUNNING" if self.running else f"PAUSED - press {a.toggle.upper()} to start")
+        if self.bite_model:
+            i = self.bite_model.info
+            log(f"bite model: {os.path.basename(a.bite_model)}, trained on {i.get('real')} real and "
+                f"{i.get('false')} false bites from {i.get('sessions')} sessions ({i.get('date')}), "
+                f"threshold {self.bite_model.threshold:.2f}")
+        else:
+            log("bite model: none - using the bite rules (run train_bite.py to make one)")
         started = time.monotonic()
         deadline = started + a.max_minutes * 60 if a.max_minutes else None
         if self.breaks.enabled and not a.dry_run:
@@ -1529,6 +1612,10 @@ def parse_args(argv=None):
     g.add_argument("--shift-min", type=float, default=0.05,
                    help="a bite moves the bobber at least this x box size (min 1.5 px); "
                         "0 = don't check (default 0.05)")
+    g.add_argument("--bite-model", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                          "bite_model.json"),
+                   help="learned bite check from train_bite.py (default bite_model.json next to "
+                        "fiska.py; 'off' = the hand-made rules below)")
     g.add_argument("--fine-shift-min", type=float, default=1.0,
                    help="...and the bobber's fine structure must move this far too (default 1.0 px)")
     g.add_argument("--texture-max", type=float, default=1.4,

@@ -298,6 +298,7 @@ class App:
         self.overlay_capturable = False
         self.waiting_for_key = False
         self.editing = False
+        self.training = None
         self.lines = deque(maxlen=400)
         self.scroll = False
         fiska.LOG_LISTENERS.append(self.on_log)
@@ -440,6 +441,19 @@ class App:
                                    "   (hidden while fishing: this Windows can't hide it from capture)")
 
         imgui.separator()
+        model = f.bite_model if f else None
+        imgui.text(f"Bite model: {'threshold %.2f, trained on %s real / %s false bites (%s)' % (model.threshold, model.info.get('real'), model.info.get('false'), model.info.get('date')) if model else 'none (rules)'}")
+        busy = self.training is not None and self.training.is_alive()
+        if busy:
+            imgui.text_colored(imgui.ImVec4(1, 0.8, 0.2, 1), "   learning from the recordings...")
+        elif imgui.small_button("learn from my recordings"):
+            if f and f.running:
+                fiska.log("pause first: learning uses a lot of CPU for a minute or two")
+            else:
+                self.training = threading.Thread(target=self.retrain, daemon=True)
+                self.training.start()
+
+        imgui.separator()
         if f:
             s = f.stats
             real = s["caught"] + s["no_bite"] + s["no_loot"]
@@ -467,6 +481,13 @@ class App:
             imgui.set_scroll_here_y(1.0)
             self.scroll = False
         imgui.end_child()
+
+    def retrain(self):
+        import train_bite
+        model = train_bite.main([], say=fiska.log)
+        if model and self.fisher:
+            self.fisher.bite_model = fiska.BiteModel(self.fisher.args.bite_model)
+            fiska.log("bite model reloaded")
 
     def poll_hotkey(self):
         down = {vk for vk in HOTKEY_CANDIDATES if user32.GetAsyncKeyState(vk) & 0x8000}
