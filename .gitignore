@@ -5,3 +5,5 @@ debug/
 fiska_state.json
 rec/
 rec_smoke/
+fiska_settings.json
+Fiska*.ini

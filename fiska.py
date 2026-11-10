@@ -107,6 +107,18 @@ NAMED_KEYS = {
 EXTENDED_VKS = {0x2D, 0x24, 0x23, 0x21, 0x22}
 
 
+def name_from_vk(vk):
+    """VK code -> the name vk_from_name() understands, or None."""
+    for name, code in NAMED_KEYS.items():
+        if code == vk:
+            return name
+    if 0x70 <= vk <= 0x87:
+        return f"f{vk - 0x70 + 1}"
+    if 0x30 <= vk <= 0x39 or 0x41 <= vk <= 0x5A:
+        return chr(vk).lower()
+    return None
+
+
 def vk_from_name(name):
     """'f10' -> VK_F10, 'pause' -> VK_PAUSE, 'e' -> 'E'."""
     n = name.strip().lower()
@@ -297,7 +309,8 @@ def _stable_change(pre, post, positive_only=False):
     return np.clip(change - noise, 0, None)
 
 
-def locate_bobber(pre, post, k, exclude=None, red_weight=3.0, ring_weight=3.0, allowed=None):
+def locate_bobber(pre, post, k, exclude=None, red_weight=3.0, ring_weight=3.0, allowed=None,
+                  guard=None):
     """Find what appeared after the cast.
 
     pre/post: lists of RGB (or gray) frames from just before the key press and
@@ -335,8 +348,11 @@ def locate_bobber(pre, post, k, exclude=None, red_weight=3.0, ring_weight=3.0, a
     smap[:, :edge] = smap[:, -edge:] = -np.inf
     # The same next to the excluded character: its zeroed pixels make the ring
     # look calm, and the head just above the box won on a zoomed-out camera.
+    # guard: keep this far (default 1.5 k); at half size 1.5 k shrank to 20 px and
+    # the head won again, so the caller passes the full-size guard.
     if exclude is not None and exclude.any():
-        smap[centered_box_mean(exclude.astype(np.float32), 2 * edge + 1) > 0] = -np.inf
+        g = edge if guard is None else guard
+        smap[centered_box_mean(exclude.astype(np.float32), 2 * g + 1) > 0] = -np.inf
     if allowed is not None:
         smap[~allowed] = -np.inf
     y, x = np.unravel_index(int(np.argmax(smap)), smap.shape)
@@ -551,6 +567,11 @@ class SplashDetector:
 # --------------------------------------------------------------------------
 
 LOG_FILE = None
+LOG_LISTENERS = []                 # callables(line), e.g. the GUI's log panel
+
+
+class Stop(Exception):
+    """Raised inside the fishing loop when the GUI asks it to stop."""
 
 
 def log(msg):
@@ -559,6 +580,8 @@ def log(msg):
     if LOG_FILE:
         LOG_FILE.write(line + "\n")
         LOG_FILE.flush()
+    for listener in LOG_LISTENERS:
+        listener(line)
 
 
 def parse_range(text):
@@ -639,6 +662,9 @@ class Fisher:
         self.window_size = None            # the game window the landings belong to
         self.cur = {}                      # metrics of the cast in progress -> casts.csv
         self.breaks = Breaks(args.work_minutes, args.break_minutes)
+        self.quit = False                  # GUI: stop the loop
+        self.status = "starting"           # GUI: what the loop is doing
+        self.watch_box = None              # GUI overlay: the box being watched (screen coords)
         self.prior_off = False             # the usual area failed: camera turned
         for d in (args.debug_dir, args.record):
             if d:
@@ -647,12 +673,16 @@ class Fisher:
     # -- control -----------------------------------------------------------
     def ready(self):
         """Toggle key + focus check. Returns the game hwnd when we may act."""
+        if self.quit:
+            raise Stop()
         if self.toggle.pressed():
             self.running = not self.running
             log("RUNNING" if self.running else "PAUSED")
         if not self.running:
+            self.status = "paused"
             return None
         hwnd = game_window(self.args.window)
+        self.status = "fishing" if hwnd else "waiting for the game window"
         if hwnd is None and not self.waiting_logged:
             log(f"waiting for focus on '{self.args.window}'")
             self.waiting_logged = True
@@ -675,7 +705,10 @@ class Fisher:
         back = time.strftime("%H:%M", time.localtime(time.time() + length))
         log(f"break: {length / 60:.1f} min after {self.breaks.worked / 60:.1f} min of fishing "
             f"(back at {back}) - {self.summary()}")
+        self.status = f"break until {back}"
         while time.monotonic() < until and not (deadline and time.monotonic() > deadline):
+            if self.quit:
+                raise Stop()
             if self.toggle.pressed():
                 self.running = False
                 log("PAUSED (break ended early)")
@@ -781,7 +814,8 @@ class Fisher:
         best = None
         for scale in a.bobber_scales:
             k = max(5, int(round(k0 * scale)))
-            cx, cy, score, _ = locate_bobber(pre, post, k, exclude, a.red_weight, allowed=zone)
+            cx, cy, score, _ = locate_bobber(pre, post, k, exclude, a.red_weight, allowed=zone,
+                                             guard=(3 * k0) // 2)
             score *= math.sqrt(scale)
             if best is None or score > best[2]:
                 best = (int(cx), int(cy), score, k)
@@ -837,6 +871,7 @@ class Fisher:
         left = region[0] + cx * ds - half
         top = region[1] + cy * ds - half
         self.cur.update(bobber_x=left + half, bobber_y=top + half)
+        self.watch_box = (left, top, 2 * half, 2 * half)
         log(f"bobber at ({left + half}, {top + half}) size {k} score {score:.1f} [{where}]")
         return (left, top, 2 * half, 2 * half)
 
@@ -1200,6 +1235,30 @@ class Fisher:
         time.sleep(random.uniform(a.loot_min, a.loot_max))
         return "caught" if loot or loot is None else "empty"
 
+    def overlay_shapes(self, box):
+        """[(label, (left, top, w, h) in screen coords, rgb)] for the GUI overlay."""
+        a = self.args
+        W, H = box[2], box[3]
+
+        def frac(f):
+            return (box[0] + f[0] * W, box[1] + f[1] * H, (f[2] - f[0]) * W, (f[3] - f[1]) * H)
+
+        shapes = [("search area", frac(a.search), (90, 160, 255)),
+                  ("character (ignored)", frac(a.exclude), (150, 150, 150))]
+        if len(self.landings) >= 5:
+            pts = np.array(self.landings, dtype=float)
+            med = np.median(pts, axis=0)
+            spread = 3 * 1.4826 * np.median(np.abs(pts - med), axis=0)
+            floor = a.zone_min * H
+            hx, hy = max(spread[0], floor), max(spread[1], floor)
+            shapes.append((f"landing zone ({len(self.landings)} catches)",
+                           (med[0] - hx, med[1] - hy, 2 * hx, 2 * hy), (80, 220, 120)))
+        elif a.prior and not self.prior_off:
+            shapes.append(("usual landing area", frac(a.prior), (240, 200, 60)))
+        if self.watch_box:
+            shapes.append(("watching", self.watch_box, (255, 60, 60)))
+        return shapes
+
     def check_zone(self, outcome):
         """Forget the landing zone after --zone-reset failed casts in a row in it.
         A zone saved at one fishing spot pinned the search to the wrong part
@@ -1298,6 +1357,10 @@ class Fisher:
         global LOG_FILE
         a = self.args
         if a.record:
+            # Every run in its own folder: cast numbers start at 1 each run, and
+            # back-to-back runs overwrote each other's cast files.
+            a.record = os.path.join(a.record, time.strftime("%Y%m%d-%H%M%S"))
+            os.makedirs(a.record, exist_ok=True)
             LOG_FILE = open(os.path.join(a.record, time.strftime("fiska-%Y%m%d-%H%M%S.log")),
                             "a", encoding="utf-8")
             log(f"recording to {os.path.abspath(a.record)}: casts.csv, per-cast .npz and .png, this log")
@@ -1336,9 +1399,10 @@ class Fisher:
                 self.breaks.add_work(time.monotonic() - cast_from)
             else:
                 log(f"max runtime of {a.max_minutes} min reached")
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, Stop):
             pass
         finally:
+            self.status = "stopped"
             self.listener.close()
             log(f"stopped after {(time.monotonic() - started) / 60:.1f} min - {self.summary()}")
 

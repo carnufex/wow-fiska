@@ -432,6 +432,37 @@ class Shift(unittest.TestCase):
         self.assertIsNone(fiska.bobber_shift(self.frames(rng, 3), self.frames(rng, 12)))
 
 
+class Console(unittest.TestCase):
+    def test_key_names_round_trip(self):
+        for name in ("pause", "f5", "f12", "a", "7", "insert"):
+            self.assertEqual(fiska.name_from_vk(fiska.vk_from_name(name)), name)
+        self.assertIsNone(fiska.name_from_vk(0x01))                      # mouse button
+
+    def test_overlay_shows_the_areas_in_screen_coordinates(self):
+        f = bare_fisher()
+        f.watch_box = None
+        box = (100, 50, 2560, 1440)
+        shapes = {label: rect for label, rect, _ in f.overlay_shapes(box)}
+        x, y, w, h = shapes["search area"]
+        self.assertAlmostEqual(x, 100 + 0.05 * 2560)
+        self.assertAlmostEqual(y, 50 + 0.10 * 1440)
+        self.assertAlmostEqual(w, 0.80 * 2560)
+        self.assertIn("usual landing area", shapes)
+        self.assertIn("character (ignored)", shapes)
+        f.landings.extend([(1300.0, 540.0)] * 6)
+        f.watch_box = (1258, 498, 84, 84)
+        labels = [label for label, _, _ in f.overlay_shapes(box)]
+        self.assertIn("landing zone (6 catches)", labels)
+        self.assertNotIn("usual landing area", labels)
+        self.assertIn("watching", labels)
+
+    def test_stop_ends_the_loop(self):
+        f = bare_fisher()
+        f.quit = True
+        with self.assertRaises(fiska.Stop):
+            f.ready()
+
+
 class BreaksTest(unittest.TestCase):
     def make(self, work=(20, 30), rest=(5, 10)):
         return fiska.Breaks(work, rest, rand=lambda lo, hi: (lo + hi) / 2)   # 25 min / 7.5 min

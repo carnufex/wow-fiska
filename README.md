@@ -78,12 +78,22 @@ In SBF's options, enable **focus audio** (mutes music/ambience while fishing).
 ## Use
 
 ```bash
+.venv\Scripts\python fiska_gui.py                          # console (records to rec\)
 .venv\Scripts\python fiska.py --record rec                 # fish; Pause = start/pause
 .venv\Scripts\python fiska.py --dry-run --record rec       # you fish, it scores itself
 .venv\Scripts\python fiska.py --calibrate                  # audio meter + addon status
 ```
 
 Keys are only sent while the foreground window title contains "World of Warcraft".
+
+**Console** (`fiska_gui.py`, Dear ImGui via `imgui-bundle`): start/pause, set the pause key
+(click *change*, press a key; saved in `fiska_settings.json`), catches / missed bites / empty
+reel-ins, the log, and **Show the search areas on the game**: an overlay on the game window with
+the search area (blue), the usual landing area or learned landing zone (yellow / green), the
+ignored character box (gray) and the box being watched (red). Place the camera so the bobber
+lands in the yellow box, away from sun glitter, players and NPCs. The overlay is click-through
+and excluded from screen capture (`SetWindowDisplayAffinity`), so the fisher never sees it.
+It starts paused; any `fiska.py` option can be passed (`--no-record` to not record).
 
 **Breaks**: after a random 20-30 min of fishing it rests a random 5-10 min, always between
 casts (the log says `break: 7.3 min after 24.1 min of fishing (back at 13:02)`). Pausing it
@@ -92,6 +102,8 @@ yourself for at least 5 min counts as the break; Pause during a break stops it (
 breaks off. Dry runs never break.
 
 ## What a session leaves behind (`--record DIR`)
+
+Every run writes into its own folder, `DIR\YYYYMMDD-HHMMSS\` (cast numbers start at 1 each run).
 
 | File | Contents |
 |---|---|

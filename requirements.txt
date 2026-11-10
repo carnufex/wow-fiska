@@ -1,3 +1,4 @@
 numpy>=1.24
 mss>=9
 PyAudioWPatch>=0.2.12
+imgui-bundle>=1.6
