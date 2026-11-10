@@ -306,6 +306,20 @@ class NewSpot(unittest.TestCase):
         _, _, single, _ = bare_fisher(["--bobber-scales", "1"]).search_spot(pre, post, None)
         self.assertLess(single, f.args.bobber_min)                     # one size alone: not found
 
+    def test_small_bobber_is_still_watched_with_a_full_size_box(self):
+        rng = np.random.default_rng(3)
+        f = bare_fisher()
+        orig = fiska.log
+        fiska.log = lambda m: None
+        try:
+            pre = [self.scene(rng) for _ in range(3)]
+            post = [self.scene(rng, (530, 234)) for _ in range(4)]
+            box = f.find_bobber((128, 144, 2048, 835), pre, post)
+        finally:
+            fiska.log = orig
+        self.assertEqual(f.cur["bobber_k"], 7)                     # found at half size...
+        self.assertEqual(box[2], 2 * int(14 * 3 / 2) * 2)          # ...watched at full size
+
     def test_head_just_above_the_excluded_character_does_not_win(self):
         rng = np.random.default_rng(4)
         f = bare_fisher()
@@ -582,7 +596,7 @@ class FlowTest(unittest.TestCase):
 
     def test_glitter_that_leaves_the_bobber_still_is_not_a_bite(self):
         """Bite-sized motion, but the bobber does not move (sun glitter, the swirl's
-        little fish): looked at twice, then ignored."""
+        little fish): ignored."""
         s = self.run_casts(FakeGame(own_splash=False, glitter=True, bite_len=1.5))
         self.assertEqual((s["caught"], s["no_loot"], s["no_bite"]), (0, 0, 1), s)
 

@@ -827,7 +827,13 @@ class Fisher:
             log(f"bobber not found (best score {score:.1f} < {a.bobber_min})")
             return None
         ds = self.screen.ds
-        half = int(k * a.motion_box / 2) * ds
+        # Watch a full-size box even when the half size found the bobber: every
+        # bite rule (cap, hold, shift) was fitted on it. With the half-size box
+        # the splash spilled out, real bites peaked over the cap and the shift
+        # check had 3 px to work with - 0 of 13 such casts caught a fish, 64 of
+        # 69 full-size ones did, all 82 on the right bobber.
+        k_watch = max(5, int(a.bobber_size * h / (a.search[3] - a.search[1])))
+        half = int(k_watch * a.motion_box / 2) * ds
         left = region[0] + cx * ds - half
         top = region[1] + cy * ds - half
         self.cur.update(bobber_x=left + half, bobber_y=top + half)
@@ -1030,8 +1036,13 @@ class Fisher:
                     shift, need = shift_now(t0, now)
                     self.cur["shift"] = round(shift, 1) if shift is not None else ""
                     if shift is not None and shift < need:
-                        # Early trigger, or not the bobber: give it another look.
-                        recheck = (t0, thr0, level0, base0, peak0, hold, now + a.shift_wait)
+                        if a.shift_wait > 0:
+                            recheck = (t0, thr0, level0, base0, peak0, hold, now + a.shift_wait)
+                            continue
+                        log(f"bobber did not move (shift {shift:.1f} px < {need:.1f}) - glitter "
+                            f"or fish passing, not a bite")
+                        keep_clip("still", now)
+                        self.cur["still"] = self.cur.get("still", 0) + 1
                         continue
                 self.cur.update(level=round(level0, 2), threshold=round(thr0, 2), peak=round(peak0, 2))
                 moved = f", moved {shift:.1f} px" if shift is not None else ""
@@ -1407,8 +1418,9 @@ def parse_args(argv=None):
     g.add_argument("--shift-min", type=float, default=0.05,
                    help="a bite moves the bobber at least this x box size (min 1.5 px); "
                         "0 = don't check (default 0.05)")
-    g.add_argument("--shift-wait", type=float, default=0.3,
-                   help="if it has not moved yet, look again this much later (default 0.3)")
+    g.add_argument("--shift-wait", type=float, default=0.0,
+                   help="if it has not moved yet, look again this much later instead of ignoring it "
+                        "(default 0 = ignore; a 2nd look caught 1 fish and reeled in 4 empty)")
     g.add_argument("--burst-quiet", type=float, default=1.0,
                    help="no bites until this long after the last over-cap sample (default 1.0 s)")
     g.add_argument("--min-calm", type=float, default=0.3,

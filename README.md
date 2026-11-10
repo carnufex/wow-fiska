@@ -47,8 +47,11 @@ So the bite is **seen** at *our* bobber. Every rule below was fitted on recorded
   box as it looked 0.4-1.0 s before is searched for in the frames of the hold; on 497 recorded
   bites it had moved >= 3.4 px in 99 % (box 42 px), while sun glitter, the little fish of a
   catch's swirl and streaks passing by left it within 1.4 px in 18 of 21 false bites. Under 5 %
-  of the box (min 1.5 px): look again 0.3 s later, then ignore. Cost: 7 of 420 Darnassus bites
-  with the bobber right behind the character's head (the head doesn't move).
+  of the box (min 1.5 px): ignored - the real bite comes after it (at sunset 11 casts had such a
+  false bite rejected and then caught the fish; a second look 0.3 s later caught 1 and reeled in
+  4 empty). Cost: 7 of 420 Darnassus bites with the bobber right behind the character's head
+  (the head doesn't move).
+- the box watched is always the full-size one, even when the half size found the bobber.
 
 Every cast gets a bite before the Fishing channel ends, so a cast that ends without one is a
 **missed bite** (the log says `MISSED the bite`): so far always the search watching the wrong
