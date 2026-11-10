@@ -60,18 +60,29 @@ So the bite is **seen** at *our* bobber. Every rule below was fitted on recorded
   false bites let through (15 -> 9) and lost 1 more real bite (4 of 227). Log: `only the light
   moved` / `sparkle over the bobber`; casts.csv `fine_shift`, `texture`, `light`.
 
-**Learned bite check** (`bite_model.json`, used instead of the shift/light rules when it is
-there): every recorded cast labels itself - the bite that led to a catch is a real bite, the bite
-of an empty reel-in and any earlier trigger in a cast that then caught are false. `train_bite.py`
-turns each trigger into features (how far the bobber moved, plainly and in fine structure, the
-fine-structure ratio, how centred and how bright the change is, the motion level, hold, peak and
-calm) and fits a logistic regression, checked session by session (each session judged by a model
-that never saw it) with its threshold set to keep 98.5 % of real bites. First model, 12 sessions,
-575 real / 56 false bites: real bites lost 9 vs 12 with the rules, false bites let through 9 vs
-12; on the sunset/Booty Bay sessions 3 of 42 false bites through vs 11. **It learns from every
-new recording**: run `.venv\Scripts\python train_bite.py` (or *learn from my recordings* in the
-console, while paused) after a session. `--bite-model off` uses the rules. Log: `bite  model
-0.93, ...` / `not a bite: model 0.04 < 0.15`; casts.csv `bite_p`.
+**Learned bite check, always learning.** Every recorded cast labels itself: the bite that led to
+a catch is a real bite; the bite of an empty reel-in and any earlier trigger in a cast that then
+caught are false. Each trigger becomes features (how far the bobber moved, plainly and in fine
+structure, the fine-structure ratio, how centred and bright the change is, motion level, hold,
+peak, calm) and a logistic regression decides. First model, 12 sessions, 575 real / 56 false
+bites, each session judged by a model that never saw it: real bites lost 9 vs 12 with the hand
+rules, false bites let through 9 vs 12 (sunset/Booty Bay: 3 of 42 vs 11).
+
+The loop, with nothing to do by hand:
+1. every run records into `rec\YYYYMMDD-HHMMSS\`;
+2. **during each break and when a run stops** the model is retrained on *all* sessions (features
+   are cached per session in `bite_features.json`, so a retrain takes a second plus the new casts);
+3. the new model is used only if, on the sessions the current model has never seen, it lost no
+   more real bites plus let through no more false bites (each session judged by a model trained
+   without it), is not worse overall, and has a sane threshold - one session with odd labels can't
+   break it;
+4. every promoted model is kept in `modelsite_model-<time>.json`; `models\current.json` is the one
+   in use (copy an older one over it to roll back). `bite_model.json` is the shipped starting point.
+
+`train_bite.py --report` shows the per-session check, `--force` promotes regardless, `--slim 10`
+drops the search images (94 % of the disk) of all but the 10 newest sessions - the clips the model
+learns from stay. `--learn off` stops learning, `--bite-model off` uses the hand rules. Log: `bite
+model 0.93, ...` / `not a bite: model 0.04 < 0.15` / `learning: ...`; casts.csv `bite_p`.
 
 Every cast gets a bite before the Fishing channel ends, so a cast that ends without one is a
 **missed bite** (the log says `MISSED the bite`): so far always the search watching the wrong
@@ -106,9 +117,12 @@ In SBF's options, enable **focus audio** (mutes music/ambience while fishing).
 
 Keys are only sent while the foreground window title contains "World of Warcraft".
 
-**Console** (`fiska_gui.py`, Dear ImGui via `imgui-bundle`): start/pause, set the pause key
-(click *change*, press a key; saved in `fiska_settings.json`), catches / missed bites / empty
-reel-ins, the log, and **Show the search areas on the game**: an overlay on the game window with
+**Console** (`fiska_gui.py`, Dear ImGui via `imgui-bundle`): a status chip and one big Start /
+Pause button, tiles for caught / missed bites / empty reel-ins / success, a strip of the last 30
+casts, and tabs: *Activity* (the log, "important only" filter), *Camera & frames*, *Bite model*
+(what it learned from, how it does session by session, learning on/off, learn now, disk use and
+freeing space) and *Settings* (pause key - click *change*, press a key - and breaks). Settings are
+saved in `fiska_settings.json`. **Show the frames on the game**: an overlay on the game window with
 the search area (blue), the usual landing area or learned landing zone (yellow / green), the
 ignored character box (gray) and the box being watched (red). Place the camera so the bobber
 lands in the yellow box, away from sun glitter, players and NPCs. The overlay is click-through

@@ -479,6 +479,76 @@ class BiteModelTest(unittest.TestCase):
         self.assertGreater(m.probability(bite), 0.9)
         self.assertLess(m.probability(glitter), 0.1)
 
+    def synthetic(self, sessions, noise=0.0, seed=0, flip=False):
+        """[(session, cast, label, features)]: real bites move (shift) and are not sparkly."""
+        rng = np.random.default_rng(seed)
+        out = []
+        for s in sessions:
+            for i in range(60):
+                lab = 1 if i % 4 else 0
+                f = {k: float(rng.normal(0, 1)) for k in fiska.BITE_FEATURES}
+                sign = (1 if lab else -1) * (-1 if flip else 1)
+                f["shift"] += 1.5 * sign + rng.normal(0, noise)
+                f["texture"] -= 1.5 * sign
+                out.append((s, str(i), lab, f))
+        return out
+
+    def run_learn(self, data, models, **kw):
+        import train_bite
+        orig = train_bite.collect
+        train_bite.collect = lambda rec, a, log=None: data
+        lines = []
+        try:
+            return train_bite.learn("unused", models=models, say=lines.append, **kw), lines
+        finally:
+            train_bite.collect = orig
+
+    def test_learning_promotes_keeps_and_skips(self):
+        import json, os, tempfile
+        import train_bite
+        with tempfile.TemporaryDirectory() as models:
+            old = self.synthetic(["a", "b", "c"])
+            verdict, _ = self.run_learn(old, models, force=True)
+            self.assertEqual(verdict, "promoted")
+            first = json.load(open(os.path.join(models, "current.json")))
+            self.assertEqual(first["sessions"], ["a", "b", "c"])
+            verdict, _ = self.run_learn(old, models)
+            self.assertEqual(verdict, "nothing new")
+            # a new session with mislabelled bites: the new model gets worse on it -> kept
+            bad = old + self.synthetic(["d"], seed=5, flip=True)
+            verdict, lines = self.run_learn(bad, models)
+            self.assertEqual(verdict, "kept", lines)
+            # a new session like the others -> promoted, history kept
+            good = old + self.synthetic(["e"], seed=6)
+            verdict, lines = self.run_learn(good, models)
+            self.assertEqual(verdict, "promoted", lines)
+            self.assertEqual(len([n for n in os.listdir(models) if n.startswith("bite_model-")]) >= 1, True)
+            self.assertIn("e", json.load(open(os.path.join(models, "current.json")))["sessions"])
+            self.assertEqual(train_bite.current_model_path(models), os.path.join(models, "current.json"))
+
+    def test_slim_keeps_what_the_bite_model_needs(self):
+        import os, tempfile, time
+        import train_bite
+        with tempfile.TemporaryDirectory() as rec:
+            for i, name in enumerate(("old", "new")):
+                d = os.path.join(rec, name)
+                os.makedirs(d)
+                open(os.path.join(d, "casts.csv"), "w").write("time,cast,outcome\n")
+                path = os.path.join(d, "cast0001.npz")
+                np.savez(path, pre=np.zeros((3, 50, 50, 3), np.uint8), post=np.zeros((4, 50, 50, 3), np.uint8),
+                         motion=np.ones((40, 2)), clip0_kind=np.array("bite"),
+                         clip0_frames=np.zeros((10, 8, 8), np.uint8))
+                t = time.time() - (1000 if name == "old" else 0)
+                os.utime(path, (t, t))
+                os.utime(d, (t, t))
+            train_bite.slim(rec, keep_sessions=1, say=lambda m: None)
+            with np.load(os.path.join(rec, "old", "cast0001.npz")) as old:
+                self.assertNotIn("pre", old)
+                self.assertIn("clip0_frames", old)
+                self.assertIn("motion", old)
+            with np.load(os.path.join(rec, "new", "cast0001.npz")) as new:
+                self.assertIn("pre", new)
+
     def test_the_shipped_model_loads(self):
         import os
         path = os.path.join(os.path.dirname(os.path.abspath(fiska.__file__)), "bite_model.json")

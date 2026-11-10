@@ -476,6 +476,7 @@ class BiteModel:
         self.weights, self.bias = np.array(m["weights"]), float(m["bias"])
         self.threshold = float(m["threshold"])
         self.info = m.get("trained_on", {})
+        self.check = m.get("check", {})
 
     def probability(self, feats):
         x = (np.array([feats[k] for k in self.features]) - self.mean) / self.std
@@ -739,11 +740,12 @@ class Fisher:
         self.cur = {}                      # metrics of the cast in progress -> casts.csv
         self.breaks = Breaks(args.work_minutes, args.break_minutes)
         self.bite_model = None
-        if args.bite_model and args.bite_model.lower() != "off" and os.path.exists(args.bite_model):
-            try:
-                self.bite_model = BiteModel(args.bite_model)
-            except (OSError, ValueError, KeyError) as err:
-                log(f"could not load {args.bite_model} ({err}) - using the bite rules")
+        self.learning = None               # background learning thread
+        self.learned = ""                  # last learning result, for the console
+        self.rec_root = args.record        # --record before run() adds the run's folder
+        self.load_bite_model()
+        self.history = deque(maxlen=40)    # GUI: outcomes of the last casts
+        self.started = None                # GUI: when run() started (monotonic)
         self.quit = False                  # GUI: stop the loop
         self.status = "starting"           # GUI: what the loop is doing
         self.watch_box = None              # GUI overlay: the box being watched (screen coords)
@@ -779,6 +781,48 @@ class Fisher:
                 return hwnd
             time.sleep(0.1)
 
+    def bite_model_path(self):
+        a = self.args
+        if a.bite_model and a.bite_model.lower() == "auto":
+            import train_bite
+            return train_bite.current_model_path()
+        return a.bite_model
+
+    def load_bite_model(self):
+        path = self.bite_model_path()
+        if not path or path.lower() == "off" or not os.path.exists(path):
+            return
+        try:
+            self.bite_model = BiteModel(path)
+        except (OSError, ValueError, KeyError) as err:
+            log(f"could not load {path} ({err}) - using the bite rules")
+
+    def learn(self, why, wait=False):
+        """Retrain the bite model on every recorded session in the background
+        (train_bite.learn) and switch to it if it is not worse. Runs during
+        breaks and when a run stops, so it never competes with a cast."""
+        a = self.args
+        if a.learn == "off" or not self.rec_root or a.bite_model.lower() != "auto" or \
+                (self.learning and self.learning.is_alive()):
+            return
+
+        def work():
+            import train_bite
+            try:
+                log(f"learning from the recordings ({why})")
+                verdict = train_bite.learn(self.rec_root, say=log)
+                if verdict == "promoted":
+                    self.load_bite_model()
+                self.learned = f"{time.strftime('%H:%M')} {verdict}"
+            except Exception as err:          # never let learning stop the fishing
+                log(f"learning failed: {err!r}")
+                self.learned = f"{time.strftime('%H:%M')} failed"
+
+        self.learning = threading.Thread(target=work, daemon=True)
+        self.learning.start()
+        if wait:
+            self.learning.join()
+
     def take_break(self, deadline=None):
         """Rest between casts. Pause key during the break = PAUSED (ends it).
         Returns early at `deadline` (the --max-minutes end)."""
@@ -788,6 +832,7 @@ class Fisher:
         log(f"break: {length / 60:.1f} min after {self.breaks.worked / 60:.1f} min of fishing "
             f"(back at {back}) - {self.summary()}")
         self.status = f"break until {back}"
+        self.learn("break")
         while time.monotonic() < until and not (deadline and time.monotonic() > deadline):
             if self.quit:
                 raise Stop()
@@ -1220,6 +1265,8 @@ class Fisher:
         self.cur = {"time": time.strftime("%Y-%m-%d %H:%M:%S")}
         start = time.monotonic()
         outcome = self._cast_once()
+        if outcome in ("caught", "empty", "no_bite", "timeout", "not_water", "no_bobber"):
+            self.history.append(outcome)
         self.check_zone(outcome)
         if self.args.record and outcome:
             self.cur.update(cast=self.cast_no, outcome=outcome,
@@ -1479,6 +1526,7 @@ class Fisher:
     def run(self):
         global LOG_FILE
         a = self.args
+        self.rec_root = a.record
         if a.record:
             # Every run in its own folder: cast numbers start at 1 each run, and
             # back-to-back runs overwrote each other's cast files.
@@ -1493,12 +1541,13 @@ class Fisher:
         log("RUNNING" if self.running else f"PAUSED - press {a.toggle.upper()} to start")
         if self.bite_model:
             i = self.bite_model.info
-            log(f"bite model: {os.path.basename(a.bite_model)}, trained on {i.get('real')} real and "
+            log(f"bite model: {os.path.basename(self.bite_model_path())}, trained on {i.get('real')} real and "
                 f"{i.get('false')} false bites from {i.get('sessions')} sessions ({i.get('date')}), "
                 f"threshold {self.bite_model.threshold:.2f}")
         else:
             log("bite model: none - using the bite rules (run train_bite.py to make one)")
         started = time.monotonic()
+        self.started = started
         deadline = started + a.max_minutes * 60 if a.max_minutes else None
         if self.breaks.enabled and not a.dry_run:
             log(f"breaks: {a.break_minutes[0]:g}-{a.break_minutes[1]:g} min after every "
@@ -1534,6 +1583,10 @@ class Fisher:
         finally:
             self.status = "stopped"
             self.listener.close()
+            if sum(self.stats[k] for k in ("caught", "no_loot")):
+                self.status = "learning"
+                self.learn("run stopped", wait=True)
+                self.status = "stopped"
             log(f"stopped after {(time.monotonic() - started) / 60:.1f} min - {self.summary()}")
 
 
@@ -1612,10 +1665,12 @@ def parse_args(argv=None):
     g.add_argument("--shift-min", type=float, default=0.05,
                    help="a bite moves the bobber at least this x box size (min 1.5 px); "
                         "0 = don't check (default 0.05)")
-    g.add_argument("--bite-model", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                                          "bite_model.json"),
-                   help="learned bite check from train_bite.py (default bite_model.json next to "
-                        "fiska.py; 'off' = the hand-made rules below)")
+    g.add_argument("--bite-model", default="auto",
+                   help="learned bite check: 'auto' = the latest learned model (models/current.json, "
+                        "else the shipped bite_model.json), a file, or 'off' = the rules below")
+    g.add_argument("--learn", choices=("on", "off"), default="on",
+                   help="retrain the bite model from the recordings during breaks and when a run "
+                        "stops; the new model is used only if it is not worse (default on)")
     g.add_argument("--fine-shift-min", type=float, default=1.0,
                    help="...and the bobber's fine structure must move this far too (default 1.0 px)")
     g.add_argument("--texture-max", type=float, default=1.4,
