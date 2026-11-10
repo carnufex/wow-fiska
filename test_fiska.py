@@ -431,6 +431,31 @@ class Shift(unittest.TestCase):
         rng = np.random.default_rng(3)
         self.assertIsNone(fiska.bobber_shift(self.frames(rng, 3), self.frames(rng, 12)))
 
+    def test_a_bite_moves_the_fine_structure_too(self):
+        rng = np.random.default_rng(4)
+        fine, texture = fiska.bite_texture(self.frames(rng, 30), self.frames(rng, 12, dy=4))
+        self.assertGreaterEqual(fine, 1.0)
+        self.assertLessEqual(texture, 1.4)
+
+    def test_a_sun_streak_sliding_over_a_still_bobber(self):
+        rng = np.random.default_rng(5)
+        after = self.frames(rng, 12)
+        yy = np.arange(42, dtype=np.float32)[:, None]
+        for i, f in enumerate(after):                              # broad bright band moving down
+            f += 70 * np.exp(-((yy - (10 + 3 * i)) / 8.0) ** 2)
+        fine, _ = fiska.bite_texture(self.frames(rng, 30), after)
+        self.assertLess(fine, 1.0)
+
+    def test_sparkles_over_a_still_bobber(self):
+        rng = np.random.default_rng(6)
+        after = self.frames(rng, 12)
+        for f in after:
+            for _ in range(6):
+                y, x = rng.integers(11, 30), rng.integers(11, 30)
+                f[y:y + 2, x:x + 3] = 255
+        _, texture = fiska.bite_texture(self.frames(rng, 30), after)
+        self.assertGreater(texture, 1.4)
+
 
 class Console(unittest.TestCase):
     def test_key_names_round_trip(self):
@@ -642,8 +667,14 @@ class FakeGame:
                     f += self.rng.normal(0, 15, f.shape).astype(np.float32)
                 elif self.ramp:        # something walks in: starts small, keeps growing
                     f += self.rng.normal(0, 2 + 40 * (now - self.splash_at), f.shape).astype(np.float32)
-                elif self.own_splash or self.glitter:  # ~3x calm, like the recordings
+                elif self.glitter:     # sparkle: sharp, everywhere, ~3x calm
                     f += self.rng.normal(0, 3, f.shape).astype(np.float32)
+                elif self.own_splash:  # a bite: a soft splash flickering over the bobber
+                    hh, ww = f.shape
+                    yy, xx = np.mgrid[0:hh, 0:ww]
+                    blob = np.exp(-(((yy - hh / 2) / (hh / 4)) ** 2 + ((xx - ww / 2) / (ww / 4)) ** 2))
+                    self.flicker = not getattr(self, "flicker", False)
+                    f += ((14.0 if self.flicker else 0.0) * blob).astype(np.float32)
         if w > 300 and self.fishing and now - self.cast_at > 0.1:       # search region
             f[100:106, 50:56] = 230                                     # our bobber, upper-left
         fiska.time.sleep(0.005)

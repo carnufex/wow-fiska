@@ -52,6 +52,13 @@ So the bite is **seen** at *our* bobber. Every rule below was fitted on recorded
   4 empty). Cost: 7 of 420 Darnassus bites with the bobber right behind the character's head
   (the head doesn't move).
 - the box watched is always the full-size one, even when the half size found the bobber.
+- and the **light must not be what moved**: the same match on fine structure only (frame minus
+  its local mean) must move >= 1 px too - a broad sun streak sliding over the box dragged the
+  plain match 4-10 px in false bites at sunset - and the fine structure at the bobber must not
+  grow more than 1.4x: a bite pulls the bobber under and its sharp edges go (median 0.83),
+  sparkles add edges (1.3-2.7). On 227 recorded real bites and 39 false ones this halved the
+  false bites let through (15 -> 9) and lost 1 more real bite (4 of 227). Log: `only the light
+  moved` / `sparkle over the bobber`; casts.csv `fine_shift`, `texture`, `light`.
 
 Every cast gets a bite before the Fishing channel ends, so a cast that ends without one is a
 **missed bite** (the log says `MISSED the bite`): so far always the search watching the wrong

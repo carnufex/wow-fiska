@@ -406,6 +406,34 @@ def bobber_shift(before, after):
     return float(np.median(dist))
 
 
+def high_pass(frame, k):
+    """Fine structure only: the frame minus its k x k local mean. Sun streaks and
+    reflections are broad; the bobber's edges and the glitter's sparkles are not."""
+    return frame - centered_box_mean(frame, k)
+
+
+def bite_texture(before, after):
+    """(fine-structure shift px, fine-structure ratio) for the bite check.
+
+    shift: bobber_shift() on high-passed frames - a broad sun streak sliding
+    over the box no longer drags the match along (raw shift 4-10 px in three
+    false bites of one sunset run, 0-1 px here).
+    ratio: fine structure in the centre half of the box after vs before. A
+    bite pulls the bobber under and its sharp edges go (median 0.83, 99 % of
+    real bites <= 1.24); sparkles passing over it add edges (1.3-2.7).
+    On 227 recorded real bites and 39 false ones, adding both to the shift
+    check halved the false bites let through (15 -> 8) for 1 more lost bite."""
+    if len(before) < 5 or len(after) < 3:
+        return None, None
+    before = [np.asarray(f, np.float32) for f in before]
+    after = [np.asarray(f, np.float32) for f in after]
+    shift = bobber_shift([high_pass(f, 7) for f in before], [high_pass(f, 7) for f in after])
+    h, w = before[0].shape
+    centre = (slice(h // 4, h - h // 4), slice(w // 4, w - w // 4))
+    energy = lambda frames: float(np.median([np.abs(high_pass(f, 5))[centre].mean() for f in frames]))
+    return shift, energy(after) / (energy(before) + 1e-6)
+
+
 class MotionTracker:
     """Frame-to-frame change inside the bobber box.
 
@@ -940,7 +968,8 @@ class Fisher:
             after = [f for t, f in clip if now - a.confirm_time < t <= now]
             shift = bobber_shift(before, after)
             need = max(a.shift_min * after[0].shape[0], 1.5) if after else 0.0
-            return shift, need
+            fine_shift, texture = bite_texture(before, after)
+            return shift, need, fine_shift, texture
 
         def bite(t, msg):
             """Real run: stop here. Dry run: note it and keep listening."""
@@ -1012,7 +1041,7 @@ class Fisher:
                 if now < at:
                     continue
                 recheck = None
-                shift, need = shift_now(t0, now)
+                shift, need, _, _ = shift_now(t0, now)
                 self.cur["shift"] = round(shift, 1) if shift is not None else ""
                 if shift is not None and shift < need:
                     log(f"bobber did not move (shift {shift:.1f} px < {need:.1f}) - glitter or "
@@ -1068,8 +1097,23 @@ class Fisher:
                     continue
                 shift = None
                 if a.shift_min:
-                    shift, need = shift_now(t0, now)
+                    shift, need, fine_shift, texture = shift_now(t0, now)
                     self.cur["shift"] = round(shift, 1) if shift is not None else ""
+                    if fine_shift is not None:
+                        self.cur.update(fine_shift=round(fine_shift, 1), texture=round(texture, 2))
+                    why = None
+                    if shift is not None and shift >= need and fine_shift is not None:
+                        if fine_shift < a.fine_shift_min:
+                            why = (f"only the light moved (fine-structure shift {fine_shift:.1f} px "
+                                   f"< {a.fine_shift_min}, raw {shift:.1f})")
+                        elif a.texture_max and texture > a.texture_max:
+                            why = (f"sparkle over the bobber (fine structure x{texture:.2f} > "
+                                   f"{a.texture_max})")
+                    if why:
+                        log(f"{why} - not a bite")
+                        keep_clip("light", now)
+                        self.cur["light"] = self.cur.get("light", 0) + 1
+                        continue
                     if shift is not None and shift < need:
                         if a.shift_wait > 0:
                             recheck = (t0, thr0, level0, base0, peak0, hold, now + a.shift_wait)
@@ -1093,7 +1137,7 @@ class Fisher:
 
     CSV_FIELDS = ("time", "cast", "outcome", "bobber_x", "bobber_y", "score", "search", "calm",
                   "level", "threshold", "peak", "hold_x_thr", "bursts", "blips", "duration_s",
-                  "bobber_k", "shift", "still")
+                  "bobber_k", "shift", "still", "fine_shift", "texture", "light")
 
     def cast_once(self):
         """One cast, with its outcome written to casts.csv (--record)."""
@@ -1485,6 +1529,11 @@ def parse_args(argv=None):
     g.add_argument("--shift-min", type=float, default=0.05,
                    help="a bite moves the bobber at least this x box size (min 1.5 px); "
                         "0 = don't check (default 0.05)")
+    g.add_argument("--fine-shift-min", type=float, default=1.0,
+                   help="...and the bobber's fine structure must move this far too (default 1.0 px)")
+    g.add_argument("--texture-max", type=float, default=1.4,
+                   help="no bite if fine structure at the bobber grows more than this x "
+                        "(sparkle; default 1.4, 0 = off)")
     g.add_argument("--shift-wait", type=float, default=0.0,
                    help="if it has not moved yet, look again this much later instead of ignoring it "
                         "(default 0 = ignore; a 2nd look caught 1 fish and reeled in 4 empty)")
