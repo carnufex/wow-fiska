@@ -43,6 +43,16 @@ So the bite is **seen** at *our* bobber. Every rule below was fitted on recorded
 - trigger peak at most 5.5 (real bites <= 4.51) and no over-cap burst in the last second;
 - it must **hold** for 0.2 s: median 0.6-2.0x the threshold (real bites 0.72-1.35x; a blip
   falls back, something walking in keeps growing).
+- the **bobber must move**: a bite pulls it under and throws a splash over it. The centre of the
+  box as it looked 0.4-1.0 s before is searched for in the frames of the hold; on 497 recorded
+  bites it had moved >= 3.4 px in 99 % (box 42 px), while sun glitter, the little fish of a
+  catch's swirl and streaks passing by left it within 1.4 px in 18 of 21 false bites. Under 5 %
+  of the box (min 1.5 px): look again 0.3 s later, then ignore. Cost: 7 of 420 Darnassus bites
+  with the bobber right behind the character's head (the head doesn't move).
+
+Every cast gets a bite before the Fishing channel ends, so a cast that ends without one is a
+**missed bite** (the log says `MISSED the bite`): so far always the search watching the wrong
+spot.
 
 | Signal | What it gives |
 |---|---|
@@ -83,7 +93,7 @@ breaks off. Dry runs never break.
 | File | Contents |
 |---|---|
 | `fiska-YYYYMMDD-HHMMSS.log` | the console log |
-| `casts.csv` | one row per cast: outcome (caught / empty / no_bite / not_water / no_bobber / lure / ...), bobber position, search score and whether the landing zone was used, bobber size, calm level, trigger level, threshold, peak, hold (x threshold), bursts, blips, duration |
+| `casts.csv` | one row per cast: outcome (caught / empty / no_bite = missed bite / not_water / no_bobber / lure / ...), bobber position, search score and whether the landing zone was used, bobber size, calm level, trigger level, threshold, peak, hold (x threshold), bobber shift (px) and bites ignored because it stayed still, bursts, blips, duration |
 | `castNNNN.npz` | pre/post frames of the bobber search, motion and audio traces, bite times, and ~1.8 s of bobber-box frames around every bite and ignored burst, and before a cast ended without our bite (to see a missed bite) |
 | `castNNNN_bobber.png` | where the bobber was found (red square) |
 | `castNNNN_bite.png` / `_burst.png` / `_notwater.png` / `_ended.png` | the search area at that moment |

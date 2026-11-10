@@ -359,6 +359,37 @@ def save_debug_png(path, img, marks):
     mss.tools.to_png(rgb.tobytes(), (rgb.shape[1], rgb.shape[0]), output=path)
 
 
+def bobber_shift(before, after):
+    """How far the bobber moved: median distance (px) at which the centre of
+    the box, as it looked `before` (median of those frames), matches best in
+    each of the `after` frames. Searched within +- a sixth of the box.
+
+    A bite pulls the bobber under and throws a splash over it: on 497 recorded
+    bites it moved >= 3.4 px in 99 % (box 42 px). Sun glitter, the little fish
+    of a catch's swirl and streaks passing through the box change pixels but
+    leave the bobber where it is: 0-1.4 px in 17 of 21 false bites."""
+    if len(before) < 5 or len(after) < 3:
+        return None
+    ref = np.median(np.stack(before).astype(np.float32), axis=0)
+    frames = np.stack(after).astype(np.float32)
+    h, w = ref.shape
+    r = max(2, h // 6)
+    y0, y1, x0, x1 = h // 3, h - h // 3, w // 3, w - w // 3
+    tpl = ref[y0:y1, x0:x1]
+    tpl = (tpl - tpl.mean()) / (tpl.std() + 1e-6)
+    best = np.full(len(frames), -9.0)
+    dist = np.zeros(len(frames))
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            patch = frames[:, y0 + dy:y1 + dy, x0 + dx:x1 + dx]
+            mean = patch.mean(axis=(1, 2), keepdims=True)
+            corr = ((patch - mean) * tpl).mean(axis=(1, 2)) / (patch.std(axis=(1, 2)) + 1e-6)
+            better = corr > best
+            best[better] = corr[better]
+            dist[better] = math.hypot(dy, dx)
+    return float(np.median(dist))
+
+
 class MotionTracker:
     """Frame-to-frame change inside the bobber box.
 
@@ -659,7 +690,7 @@ class Fisher:
         s = self.stats
         if self.args.dry_run:
             return f"detected {s['dry_hit']}, missed {s['dry_missed']}, false alarms {s['dry_false']}"
-        return (f"caught {s['caught']}, no bite {s['no_bite']}, empty reel-ins "
+        return (f"caught {s['caught']}, missed bites {s['no_bite']}, empty reel-ins "
                 f"{s['no_loot']}, recast (no bobber / not water) {s['no_bobber']}/{s['not_water']}, "
                 f"lures {s['lure']}")
 
@@ -855,11 +886,20 @@ class Fisher:
         burst_logged = -1e9
         water_checked = False
         pending = None                 # (t, threshold, level, base, peak): bite waiting to hold
-        clip = deque(maxlen=150)       # ~1.8 s of bobber-box frames, for --record
+        recheck = None                 # held, but the bobber had not moved yet: look again
+        clip = deque()                 # the last 2 s of bobber-box frames (shift check, --record)
 
         def keep_clip(kind, t):
             if self.args.record and len(self.clips) < 4:
                 self.clips.append((kind, t, [ct for ct, _ in clip], [f for _, f in clip]))
+
+        def shift_now(t0, now):
+            """(shift px, needed px) of the bobber since before the trigger at t0."""
+            before = [f for t, f in clip if t0 - 1.0 < t <= t0 - 0.4]
+            after = [f for t, f in clip if now - a.confirm_time < t <= now]
+            shift = bobber_shift(before, after)
+            need = max(a.shift_min * after[0].shape[0], 1.5) if after else 0.0
+            return shift, need
 
         def bite(t, msg):
             """Real run: stop here. Dry run: note it and keep listening."""
@@ -908,8 +948,9 @@ class Fisher:
                 self.trace_motion.append(motion.samples[-1])
                 if a.motion_cap and motion.samples[-1][1] > a.motion_cap:
                     last_big = now
-            if self.args.record:
-                clip.append((now, np.clip(frame, 0, 255).astype(np.uint8)))
+            clip.append((now, np.clip(frame, 0, 255).astype(np.uint8)))
+            while clip and now - clip[0][0] > 2.0:
+                clip.popleft()
             result = motion.check(now)
             if result is None:
                 continue
@@ -924,6 +965,25 @@ class Fisher:
                         f"{a.min_calm}-{a.max_calm}) - wrong spot")
                     self.snapshot(region, "notwater", bobber)
                     return "not_water"
+
+            if recheck:
+                t0, thr0, level0, base0, peak0, hold, at = recheck
+                if now < at:
+                    continue
+                recheck = None
+                shift, need = shift_now(t0, now)
+                self.cur["shift"] = round(shift, 1) if shift is not None else ""
+                if shift is not None and shift < need:
+                    log(f"bobber did not move (shift {shift:.1f} px < {need:.1f}) - glitter or "
+                        f"fish passing, not a bite")
+                    keep_clip("still", now)
+                    self.cur["still"] = self.cur.get("still", 0) + 1
+                    continue
+                self.cur.update(level=round(level0, 2), threshold=round(thr0, 2), peak=round(peak0, 2))
+                if bite(t0, f"bite  bobber motion {level0:.1f} (threshold {thr0:.1f}, calm "
+                            f"{base0:.1f}), held {hold:.1f}, moved {shift or 0:.1f} px (2nd look)"):
+                    return "bite"
+                continue
 
             verdict, level, threshold, base, peak = result
             if verdict == "burst" and not pending:
@@ -965,9 +1025,18 @@ class Fisher:
                         log(f"bobber moved ({level0:.1f}) but no splash heard - ignored")
                         last_note = now
                     continue
+                shift = None
+                if a.shift_min:
+                    shift, need = shift_now(t0, now)
+                    self.cur["shift"] = round(shift, 1) if shift is not None else ""
+                    if shift is not None and shift < need:
+                        # Early trigger, or not the bobber: give it another look.
+                        recheck = (t0, thr0, level0, base0, peak0, hold, now + a.shift_wait)
+                        continue
                 self.cur.update(level=round(level0, 2), threshold=round(thr0, 2), peak=round(peak0, 2))
+                moved = f", moved {shift:.1f} px" if shift is not None else ""
                 if bite(t0, f"bite  bobber motion {level0:.1f} (threshold {thr0:.1f}, calm "
-                            f"{base0:.1f}), held {hold:.1f}"):
+                            f"{base0:.1f}), held {hold:.1f}{moved}"):
                     return "bite"
                 continue
 
@@ -978,7 +1047,7 @@ class Fisher:
 
     CSV_FIELDS = ("time", "cast", "outcome", "bobber_x", "bobber_y", "score", "search", "calm",
                   "level", "threshold", "peak", "hold_x_thr", "bursts", "blips", "duration_s",
-                  "bobber_k")
+                  "bobber_k", "shift", "still")
 
     def cast_once(self):
         """One cast, with its outcome written to casts.csv (--record)."""
@@ -1082,7 +1151,7 @@ class Fisher:
                 self.report_dry(end_t, loot)
             else:
                 self.stats["no_bite"] += 1
-                log(f"Fishing channel ended without a bite{' (but loot?!)' if loot else ''}  "
+                log(f"MISSED the bite: the Fishing channel ended{' (you reeled it in)' if loot else ''}  "
                     f"({self.summary()})")
             self.save_record(cast_at, end_t, loot, bobber)
             self.snapshot(region, "ended", bobber)
@@ -1090,7 +1159,7 @@ class Fisher:
             return "no_bite"
         if result == "timeout":
             self.stats["no_bite"] += 1
-            log(f"no bite within {a.timeout:.0f}s  ({self.summary()})")
+            log(f"MISSED the bite: nothing within {a.timeout:.0f}s  ({self.summary()})")
             self.save_record(cast_at, time.monotonic(), False, bobber)
             state = self.screen.bridge(box) if has_bridge else None
             if state and state["fishing"] and not a.dry_run:
@@ -1335,6 +1404,11 @@ def parse_args(argv=None):
     g.add_argument("--confirm-max", type=float, default=2.0,
                    help="...and at most this x threshold: more means it kept growing, i.e. something "
                         "passing through (default 2.0; real bites <= 1.35)")
+    g.add_argument("--shift-min", type=float, default=0.05,
+                   help="a bite moves the bobber at least this x box size (min 1.5 px); "
+                        "0 = don't check (default 0.05)")
+    g.add_argument("--shift-wait", type=float, default=0.3,
+                   help="if it has not moved yet, look again this much later (default 0.3)")
     g.add_argument("--burst-quiet", type=float, default=1.0,
                    help="no bites until this long after the last over-cap sample (default 1.0 s)")
     g.add_argument("--min-calm", type=float, default=0.3,

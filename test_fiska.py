@@ -389,6 +389,35 @@ class NewSpot(unittest.TestCase):
             fiska.log = orig
 
 
+class Shift(unittest.TestCase):
+    def frames(self, rng, n, dy=0, specks=False):
+        out = []
+        for i in range(n):
+            f = 90 + rng.normal(0, 2, (42, 42)).astype(np.float32)
+            f[18 + dy:25 + dy, 18:24] = 180                       # bobber
+            f[14 + dy:18 + dy, 15:20] = 60                        # feather
+            if specks:                                             # glitter passing through
+                x = (i * 5) % 36
+                f[8:10, x:x + 5] = 255
+                f[30:32, (x + 17) % 36:(x + 17) % 36 + 5] = 255
+            out.append(f)
+        return out
+
+    def test_bite_moves_the_bobber(self):
+        rng = np.random.default_rng(1)
+        shift = fiska.bobber_shift(self.frames(rng, 30), self.frames(rng, 12, dy=4))
+        self.assertGreaterEqual(shift, 3.0)
+
+    def test_glitter_leaves_it_still(self):
+        rng = np.random.default_rng(2)
+        shift = fiska.bobber_shift(self.frames(rng, 30), self.frames(rng, 12, specks=True))
+        self.assertLess(shift, 1.5)
+
+    def test_too_few_frames(self):
+        rng = np.random.default_rng(3)
+        self.assertIsNone(fiska.bobber_shift(self.frames(rng, 3), self.frames(rng, 12)))
+
+
 class BreaksTest(unittest.TestCase):
     def make(self, work=(20, 30), rest=(5, 10)):
         return fiska.Breaks(work, rest, rand=lambda lo, hi: (lo + hi) / 2)   # 25 min / 7.5 min
@@ -431,8 +460,10 @@ class FakeGame:
     dry=True: the 'player' casts by themself and reels in 0.6 s after the bite.
     """
 
-    def __init__(self, own_splash, dry=False, lure=False, intruder=False, bite_len=0.5, water=1.0, ramp=False):
+    def __init__(self, own_splash, dry=False, lure=False, intruder=False, bite_len=0.5, water=1.0, ramp=False,
+                 glitter=False):
         self.own_splash, self.dry, self.lure, self.intruder, self.ramp = own_splash, dry, lure, intruder, ramp
+        self.glitter = glitter     # motion like a bite, but the bobber stays put (sun glitter)
         self.bite_len, self.water = bite_len, water
         self.fishing = False
         self.casting_until = 0.0
@@ -484,12 +515,17 @@ class FakeGame:
         now = fiska.time.monotonic()
         with self.lock:
             f = 90 + self.rng.normal(0, self.water if w <= 300 else 1, (h // 2, w // 2)).astype(np.float32)
-            if w <= 300 and self.splash_at and 0 <= now - self.splash_at < self.bite_len:
+            biting = w <= 300 and self.splash_at and 0 <= now - self.splash_at < self.bite_len
+            if w <= 300:               # the bobber, centred; a real bite pulls it under
+                dy = max(2, f.shape[0] // 8) if biting and self.own_splash and not self.glitter else 0
+                cy, cx = f.shape[0] // 2 + dy, f.shape[1] // 2
+                f[cy - 2:cy + 2, cx - 2:cx + 2] += 25
+            if biting:
                 if self.intruder:      # a pet flies through the box instead
                     f += self.rng.normal(0, 15, f.shape).astype(np.float32)
                 elif self.ramp:        # something walks in: starts small, keeps growing
                     f += self.rng.normal(0, 2 + 40 * (now - self.splash_at), f.shape).astype(np.float32)
-                elif self.own_splash:  # bite at our bobber: ~3x calm, like the recordings
+                elif self.own_splash or self.glitter:  # ~3x calm, like the recordings
                     f += self.rng.normal(0, 3, f.shape).astype(np.float32)
         if w > 300 and self.fishing and now - self.cast_at > 0.1:       # search region
             f[100:106, 50:56] = 230                                     # our bobber, upper-left
@@ -543,6 +579,12 @@ class FlowTest(unittest.TestCase):
     def test_intruder_that_ramps_up_under_the_cap_is_not_a_bite(self):
         s = self.run_casts(FakeGame(own_splash=False, ramp=True))
         self.assertEqual((s["caught"], s["no_loot"]), (0, 0), s)
+
+    def test_glitter_that_leaves_the_bobber_still_is_not_a_bite(self):
+        """Bite-sized motion, but the bobber does not move (sun glitter, the swirl's
+        little fish): looked at twice, then ignored."""
+        s = self.run_casts(FakeGame(own_splash=False, glitter=True, bite_len=1.5))
+        self.assertEqual((s["caught"], s["no_loot"], s["no_bite"]), (0, 0, 1), s)
 
     def test_blip_that_does_not_hold_is_not_a_bite(self):
         s = self.run_casts(FakeGame(own_splash=True, bite_len=0.12))
