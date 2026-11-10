@@ -333,6 +333,10 @@ def locate_bobber(pre, post, k, exclude=None, red_weight=3.0, ring_weight=3.0, a
     edge = (3 * k) // 2
     smap[:edge, :] = smap[-edge:, :] = -np.inf
     smap[:, :edge] = smap[:, -edge:] = -np.inf
+    # The same next to the excluded character: its zeroed pixels make the ring
+    # look calm, and the head just above the box won on a zoomed-out camera.
+    if exclude is not None and exclude.any():
+        smap[centered_box_mean(exclude.astype(np.float32), 2 * edge + 1) > 0] = -np.inf
     if allowed is not None:
         smap[~allowed] = -np.inf
     y, x = np.unravel_index(int(np.argmax(smap)), smap.shape)
@@ -365,6 +369,8 @@ class MotionTracker:
     Fitted on 46 recorded bites (2 dry runs + one 12-minute live run):
     - ratio 2.2 / delta 0.8: calm water peaks at 0.82 of the threshold, and a
       weak bite on a far-away bobber (median 1.6-1.7 on calm 0.67) is caught;
+      delta was lowered to 0.6 (--motion-min) after a bite on dark, calm water
+      (calm 0.44) reached 0.99 of the 0.8 threshold;
     - warmup 2.5 s: right after landing the bobber still settles, and the
       baseline is too short (earliest real bite in 96 catches: 3.2 s);
     - cap 5.5, checked only at the trigger: 112 real bites peaked at <= 4.51
@@ -687,6 +693,9 @@ class Fisher:
 
     def add_landing(self, x, y):
         self.landings.append((float(x), float(y)))
+        self.save_landings()
+
+    def save_landings(self):
         if self.args.state and self.window_size:
             try:
                 with open(self.args.state, "w", encoding="utf-8") as fh:
@@ -712,32 +721,58 @@ class Fisher:
         ys = (region[1] + np.arange(h) * ds)[:, None]
         return (np.abs(xs - med[0]) <= half_x) & (np.abs(ys - med[1]) <= half_y)
 
-    def find_bobber(self, region, pre, post):
-        """Returns the bobber box in screen coords, or None."""
+    def search_spot(self, pre, post, zone):
+        """Best (cx, cy, score, k) over the bobber sizes (--bobber-scales).
+        A zoomed-out camera halves the bobber; on the full-size window its few
+        pixels drown in water and rain and the character's head won instead.
+        Scores of a smaller window are weighted by sqrt(scale) so the two sizes
+        compare: that kept 35/35 old picks and found 3/4 new ones (the 4th was
+        hidden behind the character)."""
         a = self.args
         h, w = pre[0].shape[:2]
-        k = max(5, int(a.bobber_size * h / (a.search[3] - a.search[1])))
-        exclude = np.zeros((h, w), dtype=bool)
-        sx1, sy1, sx2, sy2 = a.search
-        ex1, ey1, ex2, ey2 = a.exclude
-        # exclude box -> search-region frame coordinates
-        fx = lambda v: int(round((v - sx1) / (sx2 - sx1) * w))
-        fy = lambda v: int(round((v - sy1) / (sy2 - sy1) * h))
-        exclude[max(0, fy(ey1)):max(0, fy(ey2)), max(0, fx(ex1)):max(0, fx(ex2))] = True
+        k0 = max(5, int(a.bobber_size * h / (a.search[3] - a.search[1])))
+        exclude = self.exclude_mask(h, w)
+        best = None
+        for scale in a.bobber_scales:
+            k = max(5, int(round(k0 * scale)))
+            cx, cy, score, _ = locate_bobber(pre, post, k, exclude, a.red_weight, allowed=zone)
+            score *= math.sqrt(scale)
+            if best is None or score > best[2]:
+                best = (int(cx), int(cy), score, k)
+        return best
 
+    def find_bobber(self, region, pre, post, more_post=None):
+        """Returns the bobber box in screen coords, or None.
+
+        more_post: callable returning a later set of post frames. The search is
+        repeated until two in a row agree: on a long cast the bobber was still
+        in the air when the first frames were taken (line going up, no bobber)."""
+        a = self.args
+        h, w = pre[0].shape[:2]
         zone = self.landing_zone(region, (h, w))
         where = "everywhere"
         if zone is not None:
-            cx, cy, score, _ = locate_bobber(pre, post, k, exclude, a.red_weight, allowed=zone)
             where = "landing zone"
-            if score < a.bobber_min:
-                log(f"nothing in the usual landing zone (best {score:.1f}) - searching everywhere")
-                zone = None
+            spot = self.search_spot(pre, post, zone)
+            if spot[2] < a.bobber_min:
+                log(f"nothing in the usual landing zone (best {spot[2]:.1f}) - searching everywhere")
+                zone, where = None, "everywhere"
         if zone is None:
-            cx, cy, score, _ = locate_bobber(pre, post, k, exclude, a.red_weight)
+            spot = self.search_spot(pre, post, None)
+        looks = 1
+        while more_post is not None and looks < 1 + a.land_checks:
+            later = more_post()
+            again = self.search_spot(pre, later, zone)
+            looks += 1
+            same = abs(again[0] - spot[0]) <= spot[3] and abs(again[1] - spot[1]) <= spot[3]
+            spot, post = again, later
+            if same:
+                break
+            log(f"bobber not settled yet (look {looks}) - looking again")
+        cx, cy, score, k = spot
         self.rec_frames = (pre, post)
         found = score >= a.bobber_min
-        self.cur.update(score=round(score, 1), search=where if found else "none")
+        self.cur.update(score=round(score, 1), search=where if found else "none", bobber_k=k)
         for d in (a.debug_dir, a.record):
             if d:
                 path = os.path.join(d, f"cast{self.cast_no:04d}_bobber.png")
@@ -750,8 +785,19 @@ class Fisher:
         left = region[0] + cx * ds - half
         top = region[1] + cy * ds - half
         self.cur.update(bobber_x=left + half, bobber_y=top + half)
-        log(f"bobber at ({left + half}, {top + half}) score {score:.1f} [{where}]")
+        log(f"bobber at ({left + half}, {top + half}) size {k} score {score:.1f} [{where}]")
         return (left, top, 2 * half, 2 * half)
+
+    def exclude_mask(self, h, w):
+        a = self.args
+        exclude = np.zeros((h, w), dtype=bool)
+        sx1, sy1, sx2, sy2 = a.search
+        ex1, ey1, ex2, ey2 = a.exclude
+        # exclude box -> search-region frame coordinates
+        fx = lambda v: int(round((v - sx1) / (sx2 - sx1) * w))
+        fy = lambda v: int(round((v - sy1) / (sy2 - sy1) * h))
+        exclude[max(0, fy(ey1)):max(0, fy(ey2)), max(0, fx(ex1)):max(0, fx(ex2))] = True
+        return exclude
 
     def snapshot(self, region, name, mark=None):
         """Colour picture of the search area at an event, for --record."""
@@ -818,6 +864,7 @@ class Fisher:
             if has_bridge:
                 state = self.screen.bridge(box)
                 if state is not None and not state["fishing"]:
+                    keep_clip("ended", now)
                     return "ended"
 
             blocks = self.listener.drain()
@@ -911,16 +958,19 @@ class Fisher:
 
             if verdict == "bite" and now - last_big >= a.burst_quiet:
                 pending = (now, threshold, level, base, peak)
+        keep_clip("ended", time.monotonic())
         return "timeout"
 
     CSV_FIELDS = ("time", "cast", "outcome", "bobber_x", "bobber_y", "score", "search", "calm",
-                  "level", "threshold", "peak", "hold_x_thr", "bursts", "blips", "duration_s")
+                  "level", "threshold", "peak", "hold_x_thr", "bursts", "blips", "duration_s",
+                  "bobber_k")
 
     def cast_once(self):
         """One cast, with its outcome written to casts.csv (--record)."""
         self.cur = {"time": time.strftime("%Y-%m-%d %H:%M:%S")}
         start = time.monotonic()
         outcome = self._cast_once()
+        self.check_zone(outcome)
         if self.args.record and outcome:
             self.cur.update(cast=self.cast_no, outcome=outcome,
                             duration_s=round(time.monotonic() - start, 1))
@@ -992,7 +1042,8 @@ class Fisher:
         time.sleep(max(0.0, a.grace - (time.monotonic() - cast_at)))
         bobber = None
         if use_vision and pre is not None:
-            bobber = self.find_bobber(region, pre, self.frames(region, n=4, gap=0.1))
+            bobber = self.find_bobber(region, pre, self.frames(region, n=4, gap=0.1),
+                                      more_post=lambda: self.frames(region, n=3, gap=0.08))
         elif use_vision:
             log("no frames from before the cast")
         if use_vision and bobber is None and a.no_bobber == "recast":
@@ -1053,6 +1104,22 @@ class Fisher:
             log(f"reeled in  ({self.summary()})")
         time.sleep(random.uniform(a.loot_min, a.loot_max))
         return "caught" if loot or loot is None else "empty"
+
+    def check_zone(self, outcome):
+        """Forget the landing zone after --zone-reset failed casts in a row in it.
+        A zone saved at one fishing spot pinned the search to the wrong part
+        of the screen at the next one (the character's head, every cast)."""
+        if outcome == "caught":
+            self.zone_misses = 0
+        elif outcome in ("no_bite", "empty", "not_water", "timeout") and \
+                self.cur.get("search") == "landing zone":
+            self.zone_misses = getattr(self, "zone_misses", 0) + 1
+            if self.args.zone_reset and self.zone_misses >= self.args.zone_reset:
+                log(f"{self.zone_misses} casts in a row failed in the learned landing zone - "
+                    f"probably a new fishing spot: forgetting it, searching everywhere")
+                self.landings.clear()
+                self.save_landings()
+                self.zone_misses = 0
 
     def give_up(self, box, has_bridge, why, outcome):
         """Reel in and cast again (real run) / wait for your reel-in (dry run)."""
@@ -1231,7 +1298,9 @@ def parse_args(argv=None):
     g.add_argument("--threshold", type=float, default=-50.0, help="splash level floor, dBFS (default -50)")
     g.add_argument("--margin", type=float, default=12.0, help="dB above background (default 12)")
     g.add_argument("--motion-ratio", type=float, default=2.2, help="bite = motion this many times calm (default 2.2)")
-    g.add_argument("--motion-min", type=float, default=0.8, help="...and at least this much above calm (default 0.8)")
+    g.add_argument("--motion-min", type=float, default=0.6,
+                   help="...and at least this much above calm (default 0.6; 0.8 missed a weak bite "
+                        "on dark, calm water by 1%%)")
     g.add_argument("--motion-cap", type=float, default=5.5,
                    help="a trigger peaking above this is something passing through the box, not a bite "
                         "(default 5.5; 112 real bites peaked at <= 4.51; 0 = off)")
@@ -1253,6 +1322,8 @@ def parse_args(argv=None):
                    help="...and at most this (default 2.5; someone walking there is ~4)")
     g.add_argument("--state", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "fiska_state.json"),
                    help="where the learned landing zone is kept between sessions ('' = do not keep)")
+    g.add_argument("--zone-reset", type=int, default=3,
+                   help="forget the landing zone after this many failed casts in a row in it (default 3; 0 = never)")
     g.add_argument("--zone-min", type=float, default=0.08,
                    help="learned landing zone: at least +/- this fraction of the window height (default 0.08)")
     g.add_argument("--motion-window", type=float, default=0.1, help="seconds of motion the bite median spans (default 0.1)")
@@ -1265,6 +1336,10 @@ def parse_args(argv=None):
     g.add_argument("--bobber-size", type=float, default=0.02, help="bobber size vs window height (default 0.02)")
     g.add_argument("--red-weight", type=float, default=3.0,
                    help="weight of newly appeared red (the feather) in the search (default 3)")
+    g.add_argument("--bobber-scales", type=lambda t: tuple(float(v) for v in t.split(",")),
+                   default=(1.0, 0.5), help="bobber sizes to try, x --bobber-size (default 1,0.5)")
+    g.add_argument("--land-checks", type=int, default=2,
+                   help="look again up to N times until the bobber stays put (default 2)")
     g.add_argument("--bobber-min", type=float, default=6.0, help="min search score to trust a match (default 6)")
     g.add_argument("--motion-box", type=float, default=3.0, help="watched box size in bobber sizes (default 3)")
     g.add_argument("--debug-dir", help="save one PNG per cast showing where the bobber was found")

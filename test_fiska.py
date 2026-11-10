@@ -270,6 +270,91 @@ class Keys(unittest.TestCase):
         self.assertEqual(ctypes.sizeof(fiska.INPUT), 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28)
 
 
+def bare_fisher(argv=()):
+    """A Fisher without screen/audio, for the search and zone logic."""
+    f = fiska.Fisher.__new__(fiska.Fisher)
+    f.args = fiska.parse_args(["--state", ""] + list(argv))
+    f.landings, f.window_size, f.cur, f.cast_no = fiska.deque(maxlen=20), None, {}, 0
+    f.screen = type("S", (), {"ds": 2})()
+    return f
+
+
+class NewSpot(unittest.TestCase):
+    """A new fishing spot: zoomed-out camera, rain, a zone learned elsewhere."""
+
+    def scene(self, rng, bobber=None, h=418, w=1024):
+        f = 90 + rng.normal(0, 2, (h, w)).astype(np.float32)          # dark, calm water
+        for _ in range(25):                                            # rain streaks
+            x, y = rng.integers(0, w), rng.integers(0, h - 12)
+            f[y:y + 12, x] = 140
+        if bobber:
+            x, y = bobber
+            f[y - 1:y + 2, x - 1:x + 2] = 200                         # a small, far bobber
+        return f
+
+    def test_small_far_bobber_in_the_rain_is_found(self):
+        rng = np.random.default_rng(3)
+        f = bare_fisher()
+        pre = [self.scene(rng) for _ in range(3)]
+        post = [self.scene(rng, (530, 234)) for _ in range(4)]
+        cx, cy, score, k = f.search_spot(pre, post, None)
+        self.assertLessEqual(abs(cx - 530), 3)
+        self.assertLessEqual(abs(cy - 234), 3)
+        self.assertGreaterEqual(score, f.args.bobber_min)
+        self.assertLess(k, 14)                                         # the half size won
+        _, _, single, _ = bare_fisher(["--bobber-scales", "1"]).search_spot(pre, post, None)
+        self.assertLess(single, f.args.bobber_min)                     # one size alone: not found
+
+    def test_head_just_above_the_excluded_character_does_not_win(self):
+        rng = np.random.default_rng(4)
+        f = bare_fisher()
+        pre = [self.scene(rng) for _ in range(3)]
+        post = [self.scene(rng, (300, 150)) for _ in range(4)]
+        for p in post:
+            p[285:302, 575:600] = 30                                   # head, just above the box
+            p[302:418, 540:640] = 40                                   # body (excluded)
+        cx, cy, _, _ = f.search_spot(pre, post, None)
+        self.assertLessEqual(abs(cx - 300), 3, (cx, cy))
+        self.assertLessEqual(abs(cy - 150), 3, (cx, cy))
+
+    def test_bobber_still_in_the_air_is_looked_at_again(self):
+        rng = np.random.default_rng(5)
+        f = bare_fisher()
+        lines = []
+        orig = fiska.log
+        fiska.log = lines.append
+        try:
+            pre = [self.scene(rng) for _ in range(3)]
+            flying = [self.scene(rng, (400, 60 + 25 * i)) for i in range(4)]     # still falling
+            landed = lambda: [self.scene(rng, (420, 200)) for _ in range(3)]
+            box = f.find_bobber((128, 144, 2048, 835), pre, flying, more_post=landed)
+        finally:
+            fiska.log = orig
+        cx = (box[0] + box[2] // 2 - 128) // 2
+        cy = (box[1] + box[3] // 2 - 144) // 2
+        self.assertLessEqual(abs(cx - 420), 3, lines)
+        self.assertLessEqual(abs(cy - 200), 3, lines)
+
+    def test_zone_from_another_spot_is_forgotten_after_three_misses(self):
+        f = bare_fisher()
+        f.landings.extend([(1250.0, 500.0)] * 10)
+        orig = fiska.log
+        fiska.log = lambda m: None
+        try:
+            for outcome in ("no_bite", "not_water", "caught", "no_bite", "no_bite"):
+                f.cur = {"search": "landing zone"}
+                f.check_zone(outcome)
+            self.assertEqual(len(f.landings), 10)          # a catch in between resets the count
+            f.cur = {"search": "everywhere"}
+            f.check_zone("no_bite")                          # not in the zone: doesn't count
+            self.assertEqual(len(f.landings), 10)
+            f.cur = {"search": "landing zone"}
+            f.check_zone("empty")
+            self.assertEqual(len(f.landings), 0)
+        finally:
+            fiska.log = orig
+
+
 class BreaksTest(unittest.TestCase):
     def make(self, work=(20, 30), rest=(5, 10)):
         return fiska.Breaks(work, rest, rand=lambda lo, hi: (lo + hi) / 2)   # 25 min / 7.5 min

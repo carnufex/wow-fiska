@@ -16,16 +16,24 @@ So the bite is **seen** at *our* bobber. Every rule below was fitted on recorded
 - what newly appeared between frames from just before the key press and just after landing,
   and then sits still; newly appeared red (the feather) weighs 3x;
 - small and alone: centre minus 3x the ring around it, so pop-up UI and big objects lose;
-- away from the frame edge (party-frame portraits sit there);
+- at two sizes (full and half): a zoomed-out camera makes the bobber half as big, and at full
+  size its few pixels drowned in rain;
+- away from the frame edge (party-frame portraits sit there) and from the character (its head,
+  just above the excluded box, won on a zoomed-out camera);
+- **landed**: the search is repeated (up to 2 more looks) until two in a row agree - on a long
+  cast the bobber was still in the air when the first frames were taken;
 - **learned landing zone**: after 5 catches, only where our bobbers have been landing
   (falls back to the whole area when nothing is there). Players walking onto the dock and
-  stopping outscored the bobber 8 times in one session before this;
+  stopping outscored the bobber 8 times in one session before this. The zone is saved between
+  sessions; 3 failed casts in a row in it (a new fishing spot) and it is forgotten and learned
+  again;
 - **water check**: the box must ripple like water (calm 0.3-2.5); wood/UI is ~0.1, someone
   walking ~4. Otherwise: reel in and cast again.
 
 **Deciding it is a bite**
 
-- median frame-to-frame change over 0.1 s reaches 2.2x calm (+0.8);
+- median frame-to-frame change over 0.1 s reaches 2.2x calm, and at least calm + 0.6 (0.8 missed
+  a weak bite on dark, calm water by 1 %; replaying 500 earlier casts gave no new false alarms);
 - not in the first 2.5 s of watching (earliest of 96 real bites: 3.2 s);
 - trigger peak at most 5.5 (real bites <= 4.51) and no over-cap burst in the last second;
 - it must **hold** for 0.2 s: median 0.6-2.0x the threshold (real bites 0.72-1.35x; a blip
@@ -70,8 +78,8 @@ breaks off. Dry runs never break.
 | File | Contents |
 |---|---|
 | `fiska-YYYYMMDD-HHMMSS.log` | the console log |
-| `casts.csv` | one row per cast: outcome (caught / empty / no_bite / not_water / no_bobber / lure / ...), bobber position, search score and whether the landing zone was used, calm level, trigger level, threshold, peak, hold (x threshold), bursts, blips, duration |
-| `castNNNN.npz` | pre/post frames of the bobber search, motion and audio traces, bite times, and ~1.8 s of bobber-box frames around every bite and ignored burst |
+| `casts.csv` | one row per cast: outcome (caught / empty / no_bite / not_water / no_bobber / lure / ...), bobber position, search score and whether the landing zone was used, bobber size, calm level, trigger level, threshold, peak, hold (x threshold), bursts, blips, duration |
+| `castNNNN.npz` | pre/post frames of the bobber search, motion and audio traces, bite times, and ~1.8 s of bobber-box frames around every bite and ignored burst, and before a cast ended without our bite (to see a missed bite) |
 | `castNNNN_bobber.png` | where the bobber was found (red square) |
 | `castNNNN_bite.png` / `_burst.png` / `_notwater.png` / `_ended.png` | the search area at that moment |
 
