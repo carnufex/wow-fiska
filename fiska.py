@@ -220,11 +220,13 @@ class Screen:
         Square 1: blue = marker (addon loaded), red = channeling Fishing,
                   green = loot window opened within the last ~1.5 s.
         Square 2: blue = marker, red = casting something (lure, bait).
+        Square 3 (1.2+): blue = marker, red = "Your fish got away!", green =
+                  "No fish are hooked." (each for 2 s).
         Each square is 6x6 UI units; at UI scale 1 the screen is 768 units high.
         """
         left, top, _, h = box
         unit = max(1.0, h / 768.0)
-        strip = self.grab_bgra(left, top + int(3 * unit) - 1, int(12 * unit) + 2, 3)
+        strip = self.grab_bgra(left, top + int(3 * unit) - 1, int(18 * unit) + 2, 3)
 
         def px(cx):
             x = min(strip.shape[1] - 2, max(1, int(round(cx))))
@@ -234,8 +236,11 @@ class Screen:
         if b < 200 or (60 < r < 200) or (60 < g < 200):
             return None
         b2, _, r2 = px(9 * unit)
+        b3, g3, r3 = px(15 * unit)
+        v12 = b3 >= 200 and not (60 < r3 < 200) and not (60 < g3 < 200)
         return {"fishing": r >= 200, "loot": g >= 200, "casting": b2 >= 200 and r2 >= 200,
-                "v11": b2 >= 200}
+                "v11": b2 >= 200, "v12": v12,
+                "escaped": v12 and r3 >= 200, "not_hooked": v12 and g3 >= 200}
 
 
 class FrameRing(threading.Thread):
@@ -727,7 +732,7 @@ class Fisher:
         self.splash = SplashDetector(args.threshold, args.margin)
         self.running = not args.start_paused
         self.waiting_logged = False
-        self.stats = {"caught": 0, "no_bite": 0, "no_loot": 0, "ignored": 0, "lure": 0,
+        self.stats = {"caught": 0, "escaped": 0, "no_bite": 0, "no_loot": 0, "ignored": 0, "lure": 0,
                       "not_water": 0, "no_bobber": 0,
                       "dry_hit": 0, "dry_missed": 0, "dry_false": 0}
         self.cast_no = 0
@@ -850,7 +855,7 @@ class Fisher:
         s = self.stats
         if self.args.dry_run:
             return f"detected {s['dry_hit']}, missed {s['dry_missed']}, false alarms {s['dry_false']}"
-        return (f"caught {s['caught']}, missed bites {s['no_bite']}, empty reel-ins "
+        return (f"caught {s['caught']}, got away {s['escaped']}, missed bites {s['no_bite']}, empty reel-ins "
                 f"{s['no_loot']}, recast (no bobber / not water) {s['no_bobber']}/{s['not_water']}, "
                 f"lures {s['lure']}")
 
@@ -1275,7 +1280,7 @@ class Fisher:
         self.cur = {"time": time.strftime("%Y-%m-%d %H:%M:%S")}
         start = time.monotonic()
         outcome = self._cast_once()
-        if outcome in ("caught", "empty", "no_bite", "timeout", "not_water", "no_bobber"):
+        if outcome in ("caught", "escaped", "empty", "no_bite", "timeout", "not_water", "no_bobber"):
             self.history.append(outcome)
         self.check_zone(outcome)
         if self.args.record and outcome:
@@ -1396,14 +1401,28 @@ class Fisher:
         press_key(self.key)
         end_t = time.monotonic()
         if has_bridge:
-            loot = self.wait_bridge(box, lambda s: s["loot"], 3.0)
+            self.wait_bridge(box, lambda s: s["loot"] or s.get("escaped") or s.get("not_hooked"), 3.0)
+            state = self.screen.bridge(box) or {}
+            loot = bool(state.get("loot"))
             if loot:
                 self.stats["caught"] += 1
                 self.add_landing(bobber[0] + bobber[2] / 2, bobber[1] + bobber[3] / 2)
                 log(f"caught!  ({self.summary()})")
+            elif state.get("escaped"):
+                # A real bite: the game let the fish go (fishing skill vs the zone).
+                self.stats["escaped"] += 1
+                self.add_landing(bobber[0] + bobber[2] / 2, bobber[1] + bobber[3] / 2)
+                log(f"the fish got away (a real bite - fishing skill)  ({self.summary()})")
+                self.save_record(cast_at, end_t, False, bobber)
+                time.sleep(random.uniform(a.loot_min, a.loot_max))
+                return "escaped"
+            elif state.get("not_hooked"):
+                self.stats["no_loot"] += 1
+                log(f"reeled in too early: no fish hooked (false bite)  ({self.summary()})")
             else:
                 self.stats["no_loot"] += 1
-                log(f"reeled in but no loot window (false bite?)  ({self.summary()})")
+                why = "false bite?" if state.get("v12") else "false bite or got away? /reload for FiskaSignal 1.2"
+                log(f"reeled in but no loot window ({why})  ({self.summary()})")
             self.save_record(cast_at, end_t, loot, bobber)
         else:
             loot = None
@@ -1441,7 +1460,7 @@ class Fisher:
         A zone saved at one fishing spot pinned the search to the wrong part
         of the screen at the next one (the character's head, every cast)."""
         where = self.cur.get("search")
-        if outcome == "caught":
+        if outcome in ("caught", "escaped"):
             self.zone_misses = 0
         elif outcome == "not_water" and where == "usual area":
             # At night the right bobber looked too calm 3 times, the usual area
@@ -1585,7 +1604,10 @@ class Fisher:
                     state = self.screen.bridge(client_box(hwnd)) if has_bridge else None
                     if state is not None and not state["v11"]:
                         log("FiskaSignal is the OLD version (no 'casting' square): lure/bait casts "
-                            "are not waited out - /reload in game to load 1.1")
+                            "are not waited out - /reload in game to load 1.2")
+                    elif state is not None and not state.get("v12"):
+                        log("FiskaSignal 1.1: a fish that got away looks like an empty reel-in "
+                            "(and teaches the bite model wrong) - copy addon 1.2 and /reload")
                     bridge_logged = has_bridge
                 cast_from = time.monotonic()
                 self.cast_once()
@@ -1597,7 +1619,7 @@ class Fisher:
         finally:
             self.status = "stopped"
             self.listener.close()
-            if sum(self.stats[k] for k in ("caught", "no_loot")):
+            if sum(self.stats[k] for k in ("caught", "escaped", "no_loot")):
                 self.status = "learning"
                 self.learn("run stopped", wait=True)
                 self.status = "stopped"

@@ -99,9 +99,10 @@ def cast_examples(path, row, a):
     final = max(bites, key=lambda c: c[1])
     out = []
     for kind, t0, times, frames in cl:
+        real = row["outcome"] in ("caught", "escaped")    # escaped: the game let it go
         if kind == final[0] and abs(t0 - final[1]) < 1e-6:
-            label = 1 if row["outcome"] == "caught" else 0
-        elif row["outcome"] == "caught" and t0 < final[1] - 1.0:
+            label = 1 if real else 0
+        elif real and t0 < final[1] - 1.0:
             label = 0                        # an earlier trigger in a cast that caught
         else:
             continue                         # unknown (e.g. before an empty reel-in)
@@ -137,8 +138,16 @@ def collect(rec, a, log=print):
         fresh, n, new = {}, 0, 0
         with open(csv_path, encoding="utf-8") as fh:
             rows = list(csv.DictReader(fh))
+        # labels.json in a session folder can mark its empty reel-ins as unknown
+        # (recorded before the addon told "got away" from "not hooked").
+        try:
+            with open(os.path.join(folder, "labels.json"), encoding="utf-8") as fh:
+                overrides = json.load(fh)
+        except (OSError, ValueError):
+            overrides = {}
+        skip = {"empty"} if overrides.get("empty") == "unknown" else set()
         for row in rows:
-            if row.get("outcome") not in ("caught", "empty"):
+            if row.get("outcome") not in ("caught", "escaped", "empty") or row["outcome"] in skip:
                 continue
             name = f"cast{int(row['cast']):04d}.npz"
             path = os.path.join(folder, name)

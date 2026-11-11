@@ -202,7 +202,7 @@ class Splash(unittest.TestCase):
 
 
 class Bridge(unittest.TestCase):
-    def state(self, sq1, sq2=(255, 0, 0), h=768):
+    def state(self, sq1, sq2=(255, 0, 0), h=768, sq3=(255, 0, 0)):
         """sq = (b, g, r) of each 6x6-unit square; h = game window height."""
         s = fiska.Screen.__new__(fiska.Screen)
         unit = max(1.0, h / 768.0)
@@ -210,14 +210,15 @@ class Bridge(unittest.TestCase):
         def grab(left, top, w, hh):
             strip = np.zeros((hh, w, 4), np.uint8)
             for x in range(w):
-                strip[:, x, :3] = sq1 if x < 6 * unit else sq2
+                strip[:, x, :3] = sq1 if x < 6 * unit else (sq2 if x < 12 * unit else sq3)
             return strip
 
         s.grab_bgra = grab
         return s.bridge((0, 0, 1000, h))
 
     def test_states(self):
-        idle = {"fishing": False, "loot": False, "casting": False, "v11": True}
+        idle = {"fishing": False, "loot": False, "casting": False, "v11": True, "v12": True,
+                "escaped": False, "not_hooked": False}
         self.assertEqual(self.state((255, 0, 0)), idle)
         self.assertEqual(self.state((255, 0, 255)), dict(idle, fishing=True))
         self.assertEqual(self.state((255, 255, 0)), dict(idle, loot=True))
@@ -226,6 +227,15 @@ class Bridge(unittest.TestCase):
         self.assertEqual(self.state((255, 0, 0), (255, 0, 255), h=1440), dict(idle, casting=True))
         self.assertIsNone(self.state((40, 50, 60)))       # game scene, no addon
         self.assertIsNone(self.state((255, 128, 0)))      # ambiguous colour
+
+    def test_third_square_tells_got_away_from_not_hooked(self):
+        for h in (768, 1440):
+            got_away = self.state((255, 0, 0), h=h, sq3=(255, 0, 255))
+            self.assertTrue(got_away["escaped"] and not got_away["not_hooked"])
+            early = self.state((255, 0, 0), h=h, sq3=(255, 255, 0))
+            self.assertTrue(early["not_hooked"] and not early["escaped"])
+        old = self.state((255, 0, 0), sq3=(60, 70, 80))                 # addon 1.1: scene there
+        self.assertFalse(old["v12"] or old["escaped"] or old["not_hooked"])
 
     def test_old_addon_without_second_square(self):
         state = self.state((255, 0, 255), (60, 70, 80))
@@ -727,6 +737,8 @@ class FakeGame:
                  glitter=False):
         self.own_splash, self.dry, self.lure, self.intruder, self.ramp = own_splash, dry, lure, intruder, ramp
         self.glitter = glitter     # motion like a bite, but the bobber stays put (sun glitter)
+        self.escape = False        # the game lets the hooked fish go (fishing skill)
+        self.escaped_until = 0.0
         self.bite_len, self.water = bite_len, water
         self.fishing = False
         self.casting_until = 0.0
@@ -757,7 +769,11 @@ class FakeGame:
             self.casting_until = now + 1.0
             return
         if self.fishing:
-            self._reel(now)
+            if self.escape and self.own_splash:
+                self.fishing = False
+                self.escaped_until = now + 2.0
+            else:
+                self._reel(now)
         else:
             self._cast(now)
 
@@ -772,7 +788,8 @@ class FakeGame:
             elif self.fishing and now > self.splash_at + 0.6:
                 self._reel(now)
         return {"fishing": self.fishing, "loot": now < self.loot_until,
-                "casting": now < self.casting_until, "v11": True}
+                "casting": now < self.casting_until, "v11": True, "v12": True,
+                "escaped": now < self.escaped_until, "not_hooked": False}
 
     def grab_gray(self, left, top, w, h):
         now = fiska.time.monotonic()
@@ -926,6 +943,12 @@ class FlowTest(unittest.TestCase):
         session, cast, label, feats = data[0]
         self.assertEqual((cast, label), ("1", 1))
         self.assertEqual(set(feats), set(fiska.BITE_FEATURES))
+
+    def test_a_fish_that_got_away_is_a_real_bite_not_an_empty_reel_in(self):
+        game = FakeGame(own_splash=True)
+        game.escape = True
+        s = self.run_casts(game)
+        self.assertEqual((s["escaped"], s["caught"], s["no_loot"]), (1, 0, 0), s)
 
     def test_the_rules_still_work_without_a_model(self):
         s = self.run_casts(FakeGame(own_splash=True), extra=["--bite-model", "off"])

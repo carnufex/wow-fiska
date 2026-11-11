@@ -95,6 +95,14 @@ drops the search images (94 % of the disk) of all but the 10 newest sessions - t
 learns from stay. `--learn off` stops learning, `--bite-model off` uses the hand rules. Log: `bite
 model 0.93, ...` / `not a bite: model 0.04 < 0.15` / `learning: ...`; casts.csv `bite_p`.
 
+**Got away vs empty**: at a spot above your fishing skill the game lets hooked fish go ("Your fish
+got away!"). That is a real bite reeled in at the right moment - counted as *got away*, and a
+real bite for the model. Only "No fish are hooked." is a false bite. Before addon 1.2 both looked
+like an empty reel-in: a 109-minute Booty Bay session had 72 "empty" reel-ins whose clips are real
+splashes (model 0.97+); trained as false bites they made every new model worse, and the gate
+refused them. A session folder's `labels.json` (`{"empty": "unknown"}`) keeps such empties out
+of training.
+
 Every cast gets a bite before the Fishing channel ends, so a cast that ends without one is a
 **missed bite** (the log says `MISSED the bite`): so far always the search watching the wrong
 spot.
@@ -102,7 +110,7 @@ spot.
 | Signal | What it gives |
 |---|---|
 | **Vision** (primary) | the above |
-| **FiskaSignal addon** (`addon/FiskaSignal`) | two squares in the top-left corner: blue = loaded, red = channeling Fishing, green = loot opened; second square red = casting (lure/bait). Confirms a cast started, waits out lure casts, knows when the bobber is gone and whether a reel-in caught something. The log warns when the game still runs the old 1.0 |
+| **FiskaSignal addon** (`addon/FiskaSignal`, 1.2) | three squares in the top-left corner: blue = loaded, red = channeling Fishing, green = loot opened; second square red = casting (lure/bait); third square red = "Your fish got away!", green = "No fish are hooked." (2 s each). Confirms a cast started, waits out lure casts, knows when the bobber is gone and whether a reel-in caught something. The log warns when the game still runs the old 1.0 |
 | **Audio** (optional) | `--confirm both` additionally requires a splash; `--confirm audio` uses sound only |
 
 Only one `fiska.py` may run: two of them reel in each other's casts.

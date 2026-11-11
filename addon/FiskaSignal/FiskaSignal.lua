@@ -5,6 +5,9 @@
 --             green = a loot window opened during the last 1.5 s (catch confirmed)
 --   square 2: blue  = always on (marker)
 --             red   = the player is casting something (applying a lure or bait)
+--   square 3: blue  = always on (marker, version 1.2+)
+--             red   = "Your fish got away!" during the last 2 s (a real bite, not caught)
+--             green = "No fish are hooked." during the last 2 s (reeled in too early)
 --
 -- It reads nothing the default UI does not already show and changes nothing.
 
@@ -63,7 +66,7 @@ end
 -- No parent: unaffected by UI scale and still visible when the UI is hidden (Alt+Z).
 local f = CreateFrame("Frame", "FiskaSignalFrame", nil)
 f:SetFrameStrata("TOOLTIP")
-f:SetSize(SIZE * 2, SIZE)
+f:SetSize(SIZE * 3, SIZE)
 f:SetPoint("TOPLEFT", WorldFrame, "TOPLEFT", 0, 0)
 
 local status = f:CreateTexture(nil, "OVERLAY")
@@ -75,13 +78,45 @@ local casting = f:CreateTexture(nil, "OVERLAY")
 casting:SetPoint("TOPLEFT", f, "TOPLEFT", SIZE, 0)
 casting:SetSize(SIZE, SIZE)
 casting:SetColorTexture(0, 0, 1, 1)
+
+local reel = f:CreateTexture(nil, "OVERLAY")
+reel:SetPoint("TOPLEFT", f, "TOPLEFT", SIZE * 2, 0)
+reel:SetSize(SIZE, SIZE)
+reel:SetColorTexture(0, 0, 1, 1)
 f:Show()
 
-local lootUntil = 0
+local ESCAPED = { ERR_FISH_ESCAPED, "Your fish got away!" }
+local NOT_HOOKED = { ERR_FISH_NOT_HOOKED, "No fish are hooked." }
+
+local function Matches(msg, list)
+    if type(msg) ~= "string" then
+        return false
+    end
+    for _, text in pairs(list) do
+        if text and msg == text then
+            return true
+        end
+    end
+    return false
+end
+
+local lootUntil, escapedUntil, notHookedUntil = 0, 0, 0
 f:RegisterEvent("LOOT_OPENED")
 pcall(f.RegisterEvent, f, "LOOT_READY") -- not in every client
-f:SetScript("OnEvent", function()
-    lootUntil = GetTime() + 1.5
+f:RegisterEvent("UI_ERROR_MESSAGE")
+f:RegisterEvent("CHAT_MSG_SYSTEM")
+f:SetScript("OnEvent", function(_, event, a1, a2)
+    if event == "LOOT_OPENED" or event == "LOOT_READY" then
+        lootUntil = GetTime() + 1.5
+        return
+    end
+    -- UI_ERROR_MESSAGE: (messageType, message) in current clients, (message) in old ones.
+    local msg = type(a2) == "string" and a2 or a1
+    if Matches(msg, ESCAPED) then
+        escapedUntil = GetTime() + 2
+    elseif Matches(msg, NOT_HOOKED) then
+        notHookedUntil = GetTime() + 2
+    end
 end)
 
 local acc = 0
@@ -93,4 +128,6 @@ f:SetScript("OnUpdate", function(_, elapsed)
     acc = 0
     status:SetColorTexture(IsFishing() and 1 or 0, GetTime() < lootUntil and 1 or 0, 1, 1)
     casting:SetColorTexture(IsCasting() and 1 or 0, 0, 1, 1)
+    local now = GetTime()
+    reel:SetColorTexture(now < escapedUntil and 1 or 0, now < notHookedUntil and 1 or 0, 1, 1)
 end)

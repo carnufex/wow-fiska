@@ -610,16 +610,18 @@ class App:
         muted(hint)
 
     def tiles(self, f):
-        s = f.stats if f else {"caught": 0, "no_bite": 0, "no_loot": 0}
-        real = s["caught"] + s["no_bite"] + s["no_loot"]
-        rate = f"{100 * s['caught'] / real:.0f}%" if real else "–"
+        s = f.stats if f else {"caught": 0, "escaped": 0, "no_bite": 0, "no_loot": 0}
+        got_away = s.get("escaped", 0)
+        real = s["caught"] + got_away + s["no_bite"] + s["no_loot"]
+        rate = f"{100 * (s['caught'] + got_away) / real:.0f}%" if real else "–"
         cells = ((str(s["caught"]), "Caught", C_GREEN),
+                 (str(got_away), "Got away", C_BLUE),
                  (str(s["no_bite"]), "Missed bites", C_RED),
                  (str(s["no_loot"]), "Empty reel-ins", C_AMBER),
-                 (rate, "Success", C_TEXT))
+                 (rate, "Bites hit", C_TEXT))
         avail = imgui.get_content_region_avail().x
         gap = 8
-        w = (avail - gap * 3) / 4
+        w = (avail - gap * (len(cells) - 1)) / len(cells)
         h = 64
         dl = imgui.get_window_draw_list()
         p = imgui.get_cursor_screen_pos()
@@ -636,6 +638,11 @@ class App:
             imgui.set_cursor_screen_pos(imgui.ImVec2(x + 14, p.y + 40))
             imgui.text_colored(C_MUTED, label)
         imgui.set_cursor_screen_pos(imgui.ImVec2(p.x, p.y + h + 8))
+        imgui.dummy(imgui.ImVec2(avail, 0))
+        if imgui.is_item_hovered():
+            imgui.set_tooltip("Bites hit = bites reeled in at the right moment (caught + got away) "
+                              "of all bites. 'Got away' is the game letting the fish go "
+                              "(fishing skill), not the detector.")
         if f:
             muted(f"Lures {s['lure']}  ·  recast (no bobber / not water) "
                   f"{s['no_bobber']} / {s['not_water']}")
@@ -643,7 +650,7 @@ class App:
     def cast_strip(self, f):
         """The last casts as coloured blocks, newest on the right."""
         history = list(f.history) if f else []
-        colours = {"caught": C_GREEN, "empty": C_AMBER, "no_bite": C_RED, "timeout": C_RED,
+        colours = {"caught": C_GREEN, "escaped": C_BLUE, "empty": C_AMBER, "no_bite": C_RED, "timeout": C_RED,
                    "not_water": C_MUTED, "no_bobber": C_MUTED}
         n = 30
         avail = imgui.get_content_region_avail().x
@@ -660,8 +667,8 @@ class App:
                                imgui.get_color_u32(colour), 3)
         imgui.dummy(imgui.ImVec2(avail, 12))
         if imgui.is_item_hovered():
-            imgui.set_tooltip("Last 30 casts: green caught, red missed bite, amber empty "
-                              "reel-in, gray recast")
+            imgui.set_tooltip("Last 30 casts: green caught, blue got away, red missed bite, "
+                              "amber empty reel-in, gray recast")
 
     # -- tabs ----------------------------------------------------------------
     def tab_activity(self, f):
