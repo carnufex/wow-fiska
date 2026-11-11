@@ -167,11 +167,14 @@ def collect(rec, a, log=print):
 
 
 # -- model -------------------------------------------------------------------
-def fit(X, y, l2=1.0, iters=300):
-    """Class-balanced L2 logistic regression (Newton's method)."""
+def fit(X, y, l2=1.0, iters=300, weights=None):
+    """Class-balanced L2 logistic regression (Newton's method); `weights`
+    scales each example (session balance)."""
     n, d = X.shape
-    wpos, wneg = 0.5 / max(y.mean(), 1e-6), 0.5 / max(1 - y.mean(), 1e-6)
-    sw = np.where(y == 1, wpos, wneg)
+    weights = np.ones(n) if weights is None else weights
+    wpos = 0.5 / max((weights * y).sum() / weights.sum(), 1e-6)
+    wneg = 0.5 / max((weights * (1 - y)).sum() / weights.sum(), 1e-6)
+    sw = np.where(y == 1, wpos, wneg) * weights
     Xb = np.hstack([X, np.ones((n, 1))])
     w = np.zeros(d + 1)
     reg = np.full(d + 1, l2)
@@ -202,23 +205,48 @@ def hand_rule(f, a):
         f["texture"] <= a.texture_max
 
 
+SESSION_CAP = 60   # a session counts as at most this many triggers per class
+
+
+def session_weights(sessions, y, cap=SESSION_CAP):
+    """Weight per example so no session counts for more than `cap` real and
+    `cap` false bites: one long Darnassus session (420 bites) outweighed all
+    other spots together, and the spot will never be fished again."""
+    w = np.ones(len(y))
+    for s in set(sessions):
+        for lab in (0, 1):
+            m = (sessions == s) & (y == lab)
+            if m.sum() > cap:
+                w[m] = cap / m.sum()
+    return w
+
+
+def weighted_quantile(values, weights, q):
+    order = np.argsort(values)
+    cum = np.cumsum(weights[order]) / weights.sum()
+    return float(values[order][min(np.searchsorted(cum, q), len(values) - 1)])
+
+
 def train(data, keep=0.985, l2=1.0):
     """(model, out-of-fold probabilities) - each session predicted by a model
-    trained on the others; the threshold keeps `keep` of the real bites."""
+    trained on the others; the threshold keeps `keep` of the real bites, with
+    every session weighted (session_weights)."""
     names = list(fiska.BITE_FEATURES)
     X = np.array([[f[k] for k in names] for _, _, _, f in data])
     y = np.array([lab for _, _, lab, _ in data], dtype=float)
     sessions = np.array([s for s, _, _, _ in data])
+    sw = session_weights(sessions, y)
     p_oof = np.full(len(y), 0.5)
     for s in sorted(set(sessions)):
         test = sessions == s
         if (~test).sum() and len(set(y[~test])) == 2:
             mean, std = standardise(X[~test])
-            w, b = fit((X[~test] - mean) / std, y[~test], l2)
+            w, b = fit((X[~test] - mean) / std, y[~test], l2, weights=sw[~test])
             p_oof[test] = 1 / (1 + np.exp(-(((X[test] - mean) / std) @ w + b)))
-    thr = float(np.quantile(p_oof[y == 1], 1 - keep)) if (y == 1).any() else 0.5
+    pos = y == 1
+    thr = weighted_quantile(p_oof[pos], sw[pos], 1 - keep) if pos.any() else 0.5
     mean, std = standardise(X)
-    w, b = fit((X - mean) / std, y, l2)
+    w, b = fit((X - mean) / std, y, l2, weights=sw)
     model = {
         "features": names, "mean": mean.tolist(), "std": std.tolist(),
         "weights": w.tolist(), "bias": float(b), "threshold": thr,

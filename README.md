@@ -79,6 +79,17 @@ The loop, with nothing to do by hand:
 4. every promoted model is kept in `modelsite_model-<time>.json`; `models\current.json` is the one
    in use (copy an older one over it to roll back). `bite_model.json` is the shipped starting point.
 
+Every session counts as at most 60 real and 60 false bites, so one long session at a spot never
+fished again (Darnassus: 420 bites) does not outweigh new spots; the threshold is weighted the
+same way. A bite the model rejects never gets a label, so it could never learn it was wrong:
+now and then (`--explore 0.1`) a near miss - within 4x under the threshold - is reeled in anyway
+(`exploring: ...` in the log, `explore` in casts.csv).
+
+The motion trigger is only a candidate generator (2.0x calm; at night real bites reached just
+0.8-1.0 of the old 2.2x) and the model judges each candidate. At night calm water at the right
+bobber measured 0.21-0.29, so the water check accepts from 0.18 (wood and UI: 0.02-0.09), and
+"not water" no longer switches the usual landing area off.
+
 `train_bite.py --report` shows the per-session check, `--force` promotes regardless, `--slim 10`
 drops the search images (94 % of the disk) of all but the 10 newest sessions - the clips the model
 learns from stay. `--learn off` stops learning, `--bite-model off` uses the hand rules. Log: `bite

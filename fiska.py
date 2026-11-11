@@ -1203,7 +1203,17 @@ class Fisher:
                         prob = self.bite_model.probability(feats)
                         self.cur.update(bite_p=round(prob, 3), shift=round(feats["shift"] * after[0].shape[0], 1),
                                         texture=round(feats["texture"], 2))
-                        if prob < self.bite_model.threshold:
+                        explore = (a.explore and not a.dry_run and
+                                   self.bite_model.threshold * 0.25 <= prob < self.bite_model.threshold
+                                   and random.random() < a.explore)
+                        if explore:
+                            # A rejected bite never gets a label (nobody reels it in), so
+                            # the model could never learn it was wrong. Now and then a
+                            # near miss is reeled in to find out.
+                            log(f"exploring: model {prob:.2f} is just under {self.bite_model.threshold:.2f} "
+                                f"- reeling in to learn whether it was a bite")
+                            self.cur["explore"] = 1
+                        elif prob < self.bite_model.threshold:
                             log(f"not a bite: model {prob:.2f} < {self.bite_model.threshold:.2f} "
                                 f"(moved {feats['shift'] * after[0].shape[0]:.1f} px, "
                                 f"texture x{feats['texture']:.2f})")
@@ -1258,7 +1268,7 @@ class Fisher:
 
     CSV_FIELDS = ("time", "cast", "outcome", "bobber_x", "bobber_y", "score", "search", "calm",
                   "level", "threshold", "peak", "hold_x_thr", "bursts", "blips", "duration_s",
-                  "bobber_k", "shift", "still", "fine_shift", "texture", "light", "bite_p")
+                  "bobber_k", "shift", "still", "fine_shift", "texture", "light", "bite_p", "explore")
 
     def cast_once(self):
         """One cast, with its outcome written to casts.csv (--record)."""
@@ -1433,6 +1443,10 @@ class Fisher:
         where = self.cur.get("search")
         if outcome == "caught":
             self.zone_misses = 0
+        elif outcome == "not_water" and where == "usual area":
+            # At night the right bobber looked too calm 3 times, the usual area
+            # was switched off and the search ended up on the quest window.
+            pass
         elif outcome in ("no_bite", "empty", "not_water", "timeout") and \
                 where in ("landing zone", "usual area"):
             self.zone_misses = getattr(self, "zone_misses", 0) + 1
@@ -1645,7 +1659,10 @@ def parse_args(argv=None):
                    help="when the bobber is not found: reel in and recast (default) or use sound")
     g.add_argument("--threshold", type=float, default=-50.0, help="splash level floor, dBFS (default -50)")
     g.add_argument("--margin", type=float, default=12.0, help="dB above background (default 12)")
-    g.add_argument("--motion-ratio", type=float, default=2.2, help="bite = motion this many times calm (default 2.2)")
+    g.add_argument("--motion-ratio", type=float, default=2.0,
+                   help="a bite candidate = motion this many times calm (default 2.0; 2.2 missed most "
+                        "bites at night, where real bites reached 0.8-1.0 of it; the bite model judges "
+                        "every candidate)")
     g.add_argument("--motion-min", type=float, default=0.6,
                    help="...and at least this much above calm (default 0.6; 0.8 missed a weak bite "
                         "on dark, calm water by 1%%)")
@@ -1668,6 +1685,9 @@ def parse_args(argv=None):
     g.add_argument("--bite-model", default="auto",
                    help="learned bite check: 'auto' = the latest learned model (models/current.json, "
                         "else the shipped bite_model.json), a file, or 'off' = the rules below")
+    g.add_argument("--explore", type=float, default=0.1,
+                   help="chance to reel in a bite the model just rejected (p within 4x of the "
+                        "threshold), so it learns from its rejections too (default 0.1; 0 = never)")
     g.add_argument("--learn", choices=("on", "off"), default="on",
                    help="retrain the bite model from the recordings during breaks and when a run "
                         "stops; the new model is used only if it is not worse (default on)")
@@ -1681,8 +1701,9 @@ def parse_args(argv=None):
                         "(default 0 = ignore; a 2nd look caught 1 fish and reeled in 4 empty)")
     g.add_argument("--burst-quiet", type=float, default=1.0,
                    help="no bites until this long after the last over-cap sample (default 1.0 s)")
-    g.add_argument("--min-calm", type=float, default=0.3,
-                   help="the bobber box must look like water: calm motion at least this (default 0.3)")
+    g.add_argument("--min-calm", type=float, default=0.18,
+                   help="the bobber box must look like water: calm motion at least this (default 0.18; "
+                        "night water at the right bobber was 0.21-0.29, wood and UI 0.02-0.09)")
     g.add_argument("--max-calm", type=float, default=2.5,
                    help="...and at most this (default 2.5; someone walking there is ~4)")
     g.add_argument("--state", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "fiska_state.json"),

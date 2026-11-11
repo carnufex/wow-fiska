@@ -549,6 +549,15 @@ class BiteModelTest(unittest.TestCase):
             with np.load(os.path.join(rec, "new", "cast0001.npz")) as new:
                 self.assertIn("pre", new)
 
+    def test_one_big_session_does_not_outweigh_the_rest(self):
+        import train_bite
+        sessions = np.array(["darnassus"] * 400 + ["dock"] * 40)
+        y = np.array([1.0] * 380 + [0.0] * 20 + [1.0] * 30 + [0.0] * 10)
+        w = train_bite.session_weights(sessions, y, cap=60)
+        self.assertAlmostEqual(w[:380].sum(), 60)                  # 380 real bites count as 60
+        self.assertAlmostEqual(w[380:400].sum(), 20)                # under the cap: unchanged
+        self.assertAlmostEqual(w[400:].sum(), 40)
+
     def test_the_shipped_model_loads(self):
         import os
         path = os.path.join(os.path.dirname(os.path.abspath(fiska.__file__)), "bite_model.json")
@@ -654,6 +663,18 @@ class FrameEditing(unittest.TestCase):
             f.cur = {"search": "usual area"}
             f.check_zone("no_bite")
         self.assertFalse(f.prior_off)
+
+    def test_calm_water_at_night_does_not_switch_the_usual_area_off(self):
+        f = self.app.fisher
+        self.app.args.prior_locked = False
+        for _ in range(5):
+            f.cur = {"search": "usual area"}
+            f.check_zone("not_water")
+        self.assertFalse(f.prior_off)
+        for _ in range(3):
+            f.cur = {"search": "usual area"}
+            f.check_zone("no_bite")
+        self.assertTrue(f.prior_off)                               # real misses still do
 
     def test_saved_frames_are_used_on_the_next_start(self):
         self.app.settings["search"] = [0.1, 0.1, 0.9, 0.7]
